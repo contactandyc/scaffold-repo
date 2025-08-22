@@ -1,0 +1,563 @@
+version: 1.0.0
+license_spdx: Apache-2.0
+author: Andy Curtis
+email: contactandyc@gmail.com
+date: 2025-08-08
+
+# Defaults that flow into all contexts unless overridden
+cmake_min_version: "3.20"
+c_standard: 23
+language: C
+pic: true
+propagate_c_std_feature: null
+simd: null
+need_libm: false
+
+# Development-only packages (installed in the container but not strictly required at runtime)
+dev_packages:
+  - valgrind
+  - gdb
+  - python3
+  - python3-venv
+  - python3-pip
+  - perl
+  - autoconf
+  - automake
+  - libtool
+
+# Enabled by default (repo's scaffold-repo.yaml can override with its own `packages:`)
+packages:
+  - tests
+  - docs
+  - site
+  - git
+
+authors:
+  - andy_curtis
+
+contributors:
+  andy_curtis:
+    name: Andy Curtis
+    email: contactandyc@gmail.com
+    linkedin: linkedin.com/in/andycurtis
+    github: github.com/andycurtis-public/
+    contact: "{{ name }} <{{ email }}>"
+    author: "{{ name }} <{{ email }}> {{ linkedin }} {{ github }}"
+  knode:
+    name: Knode.ai
+    website: https://www.knodeai.com/
+    contact: "{{ name }}"
+
+license_profile: andy
+# github_project: knode-ai-open-source
+github_project: andycurtis-public
+
+licenses:
+  knode-andy-maintainer:
+    spdx: |  # SPDX block (no comment symbols here; tool will add them)
+      SPDX-FileCopyrightText: 2024–2025 {{ contributors.knode.contact }}
+      SPDX-License-Identifier: Apache-2.0
+      Maintainer: {{ contributors.andy_curtis.contact }}
+
+    # Primary license file that must exist in the target repo
+    license: LICENSE
+    # Canonical text to compare/copy from packaged resources
+    license_canonical: resources/licenses/Apache-2.0.txt
+    notice: |
+      {{ project_title }} © 2024–2025 {{ contributors.knode.contact }}
+      Technical contact: {{ contributors.andy_curtis.contact }}
+      Licensed under Apache-2.0 (see LICENSE)
+
+  knode-shared-19:
+    spdx: |
+      SPDX-FileCopyrightText: 2019–{{ year }} {{ contributors.andy_curtis.contact }}
+      SPDX-FileCopyrightText: 2024–2025 {{ contributors.knode.contact }} — technical questions: contact Andy (above)
+      SPDX-License-Identifier: Apache-2.0
+
+    license: LICENSE
+    license_canonical: resources/licenses/Apache-2.0.txt
+    notice: |
+      {{ project_title }}
+      © 2019–2025 {{ contributors.andy_curtis.contact }}
+      © 2024–2025 {{ contributors.knode.contact }}
+      Licensed under Apache-2.0 (see LICENSE)
+
+  dutch-national-flag:
+    spdx: |
+      Based on the Dutch national flag problem (https://en.wikipedia.org/wiki/Dutch_national_flag_problem)
+      Consulted: Bentley & McIlroy, “Engineering a sort function,”
+      Software – Practice and Experience 23(11): 1249–1265 (1993)
+
+    notice: |
+      Based on the Dutch national flag problem (https://en.wikipedia.org/wiki/Dutch_national_flag_problem)
+      Consulted: Bentley & McIlroy, “Engineering a sort function,”
+      Software – Practice and Experience 23(11): 1249–1265 (1993)
+
+  knode-shared-23:
+    spdx: |
+      SPDX-FileCopyrightText: 2023–{{ year }} {{ contributors.andy_curtis.contact }}
+      SPDX-FileCopyrightText: 2024–2025 {{ contributors.knode.contact }} — technical questions: contact Andy (above)
+      SPDX-License-Identifier: Apache-2.0
+
+    license: LICENSE
+    license_canonical: resources/licenses/Apache-2.0.txt
+    notice: |
+      {{ project_title }}
+      © 2023–2025 {{ contributors.andy_curtis.contact }}
+      © 2024–2025 {{ contributors.knode.contact }}
+      Licensed under Apache-2.0 (see LICENSE)
+
+  knode-shared:
+    spdx: |
+      SPDX-FileCopyrightText: {{ year }} {{ contributors.andy_curtis.contact }}
+      SPDX-FileCopyrightText: 2024–2025 {{ contributors.knode.contact }} — technical questions: contact Andy (above)
+      SPDX-License-Identifier: Apache-2.0
+
+    license: LICENSE
+    license_canonical: resources/licenses/Apache-2.0.txt
+    notice: |
+      {{ project_title }}
+      © 2025 {{ contributors.andy_curtis.contact }}
+      © 2024–2025 {{ contributors.knode.contact }}
+      Licensed under Apache-2.0 (see LICENSE)
+
+  andy:
+    spdx: |
+      SPDX-FileCopyrightText: 2025 {{ contributors.andy_curtis.contact }}
+      SPDX-License-Identifier: Apache-2.0
+
+    license: LICENSE
+    license_canonical: resources/licenses/Apache-2.0.txt
+    notice: |
+      {{ project_title }} © 2025 {{ contributors.andy_curtis.contact }}
+      Licensed under Apache-2.0 (see LICENSE)
+
+  openai-api:
+    spdx: |
+      SPDX-FileCopyrightText: 2025 {{ contributors.andy_curtis.contact }}
+      SPDX-License-Identifier: Apache-2.0
+
+      SPDX-FileComment: This project is an independent library for interacting with the OpenAI API.
+      It is not affiliated with, endorsed by, or sponsored by OpenAI.
+      "OpenAI" and related marks are trademarks of OpenAI OpCo, LLC.
+    license: LICENSE
+    license_canonical: resources/licenses/Apache-2.0.txt
+    notice: |
+      {{ project_title }} © 2025 {{ contributors.andy_curtis.contact }}
+      Licensed under Apache-2.0 (see LICENSE)
+
+      NON-AFFILIATION: This software is an independent library for interacting with the OpenAI API.
+      It is not affiliated with, endorsed by, or sponsored by OpenAI. "OpenAI" and related marks
+      are trademarks of OpenAI OpCo, LLC.
+
+  lz4:
+    license: LICENSE.lz4
+    license_canonical: resources/licenses/lz4.txt
+    notice: |
+      Portions © 2011–present Yann Collet — BSD-2-Clause (see LICENSE.lz4)
+
+# Optional context defaults
+cmake:
+  kind: library
+tests:
+  kind: tests
+
+library_templates:
+  git_build:
+    kind: git
+    url: https://github.com/{{ github_project }}/{{ name }}.git
+    shallow: true
+    build_steps:
+      - git clone --depth 1 "https://github.com/{{ github_project }}/{{ name }}.git" "{{ name }}"
+      - cd {{ name }}
+      - ./build.sh install
+      - cd ..
+      - rm -rf {{ name }}
+    find_package: "{{ project_name }} CONFIG REQUIRED"
+    link: "{{ project_name }}::{{ project_name }}"
+
+libraries:
+  # ── System / 3rd-party ─────────────────────────────────────────────
+  - name: Threads
+    kind: system
+    find_package: "Threads REQUIRED"
+    link: "Threads::Threads"
+    pkg: build-essential
+
+  - name: ZLIB
+    kind: system
+    find_package: "ZLIB REQUIRED"
+    link: "ZLIB::ZLIB"
+    pkg: zlib1g-dev
+
+  - name: OpenSSL
+    kind: system
+    find_package: "OpenSSL REQUIRED"
+    link: "OpenSSL::Crypto"
+    pkg: libssl-dev
+
+  - name: libjwt
+    kind: git
+    url: https://github.com/benmcollins/libjwt.git
+    shallow: true
+    dir: libjwt
+    build_steps:
+      - git clone --depth 1 "https://github.com/benmcollins/libjwt.git" "libjwt"
+      - cd libjwt
+      - mkdir -p build
+      - cd build
+      - cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+      - make -j"$(nproc)"
+      - sudo make install
+      - cd /
+      - rm -rf libjwt
+    find_package: "libjwt REQUIRED"
+    link: "jwt::jwt"
+    depends_on: [libjansson-dev]
+
+  - name: libjansson-dev
+    kind: system
+    find_package: null
+    link: jansson
+    pkg: libjansson-dev
+
+  - name: CURL
+    kind: system
+    find_package: "CURL REQUIRED"
+    link: "CURL::libcurl"
+    pkg: libcurl4-openssl-dev
+    depends_on: [OpenSSL, ZLIB, Threads]
+
+  - name: asio
+    kind: git
+    url: https://github.com/chriskohlhoff/asio.git
+    branch: asio-1-30-2
+    dir: asio
+    build_steps:
+      - git clone --depth 1 --branch asio-1-30-2 --single-branch "https://github.com/chriskohlhoff/asio.git" "asio"
+      - cd asio/asio
+      - ./autogen.sh
+      - cd ../../
+      - mkdir -p build/asio
+      - cd build/asio
+      - ../../asio/asio/configure --prefix=/usr/local
+      - make -j"$(nproc)"
+      - sudo make install
+      - cd ../..
+      - rm -rf asio
+    find_package: "asio REQUIRED"
+    link: "asio::asio"
+
+  - name: fmt
+    kind: git
+    url: https://github.com/andycurtis-public/restinio.git
+    dir: restinio/fmt
+    build_steps:
+      - git clone --depth 1 "https://github.com/andycurtis-public/restinio.git" "restinio"
+      - mkdir -p build/fmt
+      - cd build/fmt
+      - cmake ../../restinio/fmt
+      - make -j"$(nproc)"
+      - sudo make install
+      - cd ../..
+      - rm -rf restinio
+    find_package: "fmt REQUIRED"
+    link: "fmt::fmt"
+
+  - name: expected-lite
+    kind: git
+    url: https://github.com/andycurtis-public/restinio.git
+    dir: restinio/expected-lite
+    build_steps:
+      - git clone --depth 1 "https://github.com/andycurtis-public/restinio.git" "restinio"
+      - mkdir -p build/expected-lite
+      - cd build/expected-lite
+      - cmake ../../restinio/expected-lite
+      - make -j"$(nproc)"
+      - sudo make install
+      - cd ../..
+      - rm -rf restinio
+    find_package: "expected-lite CONFIG REQUIRED"
+    link: "nonstd::expected-lite"
+
+  - name: restinio
+    kind: git
+    url: https://github.com/andycurtis-public/restinio.git
+    branch: v.0.7.3-fork
+    dir: restinio/dev
+    build_steps:
+      - git clone --depth 1 --branch v.0.7.3-fork --single-branch "https://github.com/andycurtis-public/restinio.git" "restinio"
+      - mkdir -p build/restinio
+      - cd build/restinio
+      - cmake ../../restinio/dev -DRESTINIO_SAMPLE=OFF -DRESTINIO_TEST=OFF -DRESTINIO_DEP_FMT=system -DRESTINIO_DEP_EXPECTED_LITE=system
+      - make -j"$(nproc)"
+      - sudo make install
+      - cd ../..
+      - rm -rf restinio
+    find_package: "restinio REQUIRED"
+    link: "restinio::restinio"
+    license_spdx: BSD-3-Clause
+    attribution: "restinio by Stiffstream — BSD-3-Clause"
+    depends_on: [fmt, expected-lite, asio]
+
+  - name: libm
+    kind: system
+    find_package: null
+    link: m
+    pkg: null
+
+  # ── Foundation repos ───────────────────────────────────────────────
+  - name: the-macro-library
+    project_title: The Macro Library
+    cmake:
+      kind: header_only
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared-19
+    sources: []
+    license_extras:
+      "include/the-macro-library/src/macro_dutch_flag_partition.h": dutch-national-flag
+    extra_targets: |
+      # Custom command for indent
+      add_custom_target(
+          indent
+          COMMAND python3 ${CMAKE_SOURCE_DIR}/bin/indent-macros
+                          ${CMAKE_SOURCE_DIR}/include/*/*.h
+                          ${CMAKE_SOURCE_DIR}/include/*/*/*.h
+          COMMENT "Indenting files..."
+      )
+
+      # Custom target for building examples
+      add_custom_target(examples
+          COMMAND ${CMAKE_COMMAND} -E echo "Building examples"
+          COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/examples"
+          COMMAND ${CMAKE_COMMAND} -E chdir "${CMAKE_BINARY_DIR}/examples"
+                                   ${CMAKE_COMMAND} -DCMAKE_BUILD_TYPE=$<CONFIG> "${CMAKE_SOURCE_DIR}/examples"
+          COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}/examples"
+          WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+          COMMENT "Building examples"
+      )
+
+      install(PROGRAMS ${CMAKE_SOURCE_DIR}/bin/convert-macros-to-code
+                       ${CMAKE_SOURCE_DIR}/bin/indent-macros
+              DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+  - name: a-memory-library
+    project_title: A Memory Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared-19
+
+  - name: the-lz4-library
+    project_title: The LZ4 Library
+    version: 0.0.1
+    template: git_build
+    library_sources:
+      - src/lz4.c
+    license_profile: knode-shared-19
+    license_overrides:
+      "src/impl/**": lz4
+    depends_on:
+      - a-memory-library
+
+  - name: the-io-library
+    project_title: The IO Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared-19
+    depends_on:
+      - a-memory-library
+      - the-macro-library
+      - the-lz4-library
+      - ZLIB
+    apps:
+      context:
+        dest: examples
+        depends_on:
+          - the-io-library
+      map-reduce:
+        binaries:
+          - dump_files_1
+          - dump_files_2
+          - dump_files_3
+          - dump_files_4
+          - dump_files_5
+          - dump_files_6
+          - dump_files_7
+          - list_files
+
+  # ── JSON stack ─────────────────────────────────────────────────────
+  - name: a-json-library
+    project_title: A JSON Library
+    version: 0.0.1
+    template: git_build
+    depends_on:
+      - a-memory-library
+      - the-macro-library
+    license_profile: knode-shared-19
+
+  - name: a-json-schema-builder-library
+    project_title: A JSON Schema Builder Library
+    version: 0.0.1
+    template: git_build
+    depends_on:
+      - a-json-library
+
+  # ── cURL stack ─────────────────────────────────────────────────────
+  - name: a-curl-library
+    project_title: A CURL Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared
+    depends_on:
+      - a-json-library
+      - CURL
+
+  - name: an-openai-api-library
+    project_title: An OpenAI API Library
+    version: 0.0.1
+    template: git_build
+    depends_on:
+      - a-curl-library
+      - a-json-schema-builder-library
+    apps:
+      context:
+        dest: examples
+        depends_on:
+          - an-openai-api-library
+      embeddings:
+        binaries:
+          - embed_test
+      responses_01_basic_text:
+        binaries:
+          - basic_text
+          - basic_text_cache_miss
+          - basic_text_chain
+          - basic_text_error
+          - basic_text_instructions
+          - basic_text_logprobs
+          - basic_text_max_tokens
+          - basic_text_parallel
+          - basic_text_temperature_sweep
+      responses_02_structured_output:
+        binaries:
+          - structured_single_object
+          - structured_array
+          - structured_nested
+          - structured_chain_single_followup
+          - structured_chain_parallel_followup
+          - structured_validation_error
+          - structured_contact_form
+          - structured_calendar_event
+          - structured_invoice_line_items
+          - structured_moderation_report
+          - structured_ui_tree
+          - structured_search_query
+          - structured_options_with_null
+          - structured_streaming_entities
+          - structured_chain_generate_then_expand
+          - structured_validation_showcase
+
+  # ── NLP / search ───────────────────────────────────────────────────
+  - name: a-tokenizer-library
+    project_title: A Tokenizer Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared-19
+    depends_on:
+      - a-memory-library
+      - the-macro-library
+
+  - name: a-sentence-chunker-library
+    project_title: A Sentence Chunker Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared
+    depends_on:
+      - a-memory-library
+      - the-macro-library
+      - the-io-library
+
+  - name: search-index-library
+    project_title: Search Index Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared-23
+    depends_on:
+      - a-memory-library
+      - the-macro-library
+      - the-io-library
+      - a-tokenizer-library
+
+  - name: sql-parser-library
+    project_title: SQL Parser Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared
+    depends_on:
+      - a-memory-library
+      - the-macro-library
+
+  - name: stemmer-library
+    project_title: Stemmer Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared
+    depends_on:
+      - a-memory-library
+      - the-macro-library
+
+  # ── Misc repos ────────────────────────────────────────────────────
+  - name: a-bitset-library
+    project_title: A Bitset Library
+    version: 0.0.1
+    template: git_build
+    depends_on:
+      - a-memory-library
+    license_profile: knode-shared-23
+
+  - name: an-encryption-library
+    project_title: An Encryption Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared
+    depends_on:
+      - OpenSSL
+
+  - name: restinio-c
+    project_title: Restinio C Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared
+    depends_on:
+      - restinio
+      - fmt
+      - expected-lite
+      - asio
+
+  - name: embedding-library
+    project_title: Embedding Library
+    version: 0.0.1
+    template: git_build
+    license_profile: knode-shared
+    depends_on:
+      - libm
+
+# Map package name -> glob patterns (relative to templates/)
+template_packages:
+  changie:
+    - ".changie.yaml"
+    - ".changes/header.tpl.md"
+    - ".changes/unreleased/**"
+  tests:
+    - "tests/**"
+  site:
+    - "_config.yml*"
+    - "_layouts/**"
+  docs:
+    - "BUILDING.md"
+  git:
+    - ".gitignore"
+  resources:
+    - "resources/**"
+    - scaffold-repo.yaml

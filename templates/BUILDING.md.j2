@@ -1,0 +1,153 @@
+# BUILDING
+
+This project: **{{ project_title }}**
+Version: **{{ version }}**
+
+## Local build
+
+```bash
+# one-shot build + install
+./build.sh install
+````
+
+Or run the steps manually:
+
+```bash
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . -j"$(nproc || sysctl -n hw.ncpu || echo 4)"
+sudo cmake --install .
+```
+
+{% set libs = (cmake.libraries or []) %}
+{% set apt_pkgs = (cmake.apt_packages or []) %}
+{% set apt_dev = (cmake.apt_dev_packages or []) %}
+{% if libs %}
+
+## Install dependencies (from `cmake.libraries`)
+
+{% if apt_pkgs and apt_pkgs|length %}
+
+### System packages (required)
+
+```bash
+sudo apt-get update && sudo apt-get install -y {{ apt_pkgs|join(' ') }}
+```
+
+{% endif %}
+
+{% if apt_dev and apt_dev|length %}
+
+### Development tooling (optional)
+
+```bash
+sudo apt-get update && sudo apt-get install -y {{ apt_dev|join(' ') }}
+```
+
+{% endif %}
+
+{% for lib in libs %}
+
+### {{ lib.name }}
+
+{% if lib.build_steps %}
+Clone & build:
+
+```bash
+{% for s in lib.build_steps %}
+{{ s }}
+{% endfor %}
+```
+
+{% elif lib.kind == "system" %}
+Install via package manager:
+
+```bash
+sudo apt-get update && sudo apt-get install -y {{ lib.pkg|default("...") }}
+```
+
+{% endif %}
+{% endfor %}
+{% endif %}
+
+## Docker (optional)
+
+```dockerfile
+# syntax=docker/dockerfile:1
+ARG UBUNTU_TAG={{ ubuntu_tag|default("22.04") }}
+FROM ubuntu:${UBUNTU_TAG}
+
+# --- Configurable (can be overridden with --build-arg) ---
+ARG CMAKE_VERSION={{ cmake_version|default("3.26.4") }}
+ARG CMAKE_BASE_URL={{ cmake_base_url|default("https://github.com/Kitware/CMake/releases/download") }}
+ARG GITHUB_TOKEN
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- Base system setup --------------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    curl \
+    wget \
+    tar \
+    unzip \
+    zip \
+    pkg-config \
+    sudo \
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+{% if cmake.apt_dev_packages %}
+# Development tooling (optional)
+RUN apt-get update && apt-get install -y \
+{% for p in cmake.apt_dev_packages %}
+    {{ p }} \
+{% endfor %}
+ && rm -rf /var/lib/apt/lists/*
+{% endif %}
+
+# --- Install CMake from official binaries (arch-aware) ------------------------
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+      x86_64) CMAKE_ARCH=linux-x86_64 ;; \
+      aarch64) CMAKE_ARCH=linux-aarch64 ;; \
+      *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    apt-get update && apt-get install -y wget tar && rm -rf /var/lib/apt/lists/*; \
+    wget -q "${CMAKE_BASE_URL}/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-${CMAKE_ARCH}.tar.gz" -O /tmp/cmake.tgz; \
+    tar --strip-components=1 -xzf /tmp/cmake.tgz -C /usr/local; \
+    rm -f /tmp/cmake.tgz
+
+# --- Create a non-root 'dev' user with passwordless sudo ----------------------
+RUN useradd --create-home --shell /bin/bash dev && \
+    echo "dev ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
+    mkdir -p /workspace && chown dev:dev /workspace
+
+USER dev
+WORKDIR /workspace
+
+# --- Optional Python venv for tools ------------------------------------------
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip
+ENV PATH="/opt/venv/bin:${PATH}"
+
+{% for lib in cmake.libraries if lib.kind in ["git","tar"] and lib.build_steps %}
+# --- Build & install {{ lib.name }} ---
+RUN set -eux; \
+{% for s in lib.build_steps %}
+  {{ s }}{% if not loop.last %} && \{% endif %}
+
+{% endfor %}
+
+{% endfor %}
+
+# --- Build & install this project --------------------------------------------
+COPY --chown=dev:dev . /workspace/{{ project_name }}
+RUN mkdir -p /workspace/build/{{ project_name }} && \
+    cd /workspace/build/{{ project_name }} && \
+    cmake /workspace/{{ project_name }} && \
+    make -j"$(nproc)" && sudo make install
+
+CMD ["/bin/bash"]
+```

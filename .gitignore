@@ -1,0 +1,10 @@
+venv
+build
+.idea
+*~
+*.dSYM
+build-unix_makefiles
+demo-lib
+.venv
+repos
+__pycache__
