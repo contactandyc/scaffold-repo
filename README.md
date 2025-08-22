@@ -1,96 +1,89 @@
 # scaffold-repo
 
-A small, batteries‑included tool to **stamp opinionated templates into a C/C++ repository** and **enforce OSS hygiene** (SPDX headers, NOTICE, license texts). You describe your project once in `scaffold-repo.yaml`; `scaffold-repo` derives CMake configuration, optional tests/apps scaffolding, a `BUILDING.md`, a Dockerfile, and keeps SPDX/NOTICE/license files correct and up‑to‑date.
+A small, batteries‑included tool to **stamp opinionated templates into one or many C/C++ repositories** and **enforce OSS hygiene** (SPDX headers, NOTICE, license texts). You point it at a repo (or a monorepo root) and, using a simple YAML model, it derives CMake, scaffolds tests/apps/docs/site, and keeps your license files correct and up‑to‑date.
+
+---
+
+## Highlights
+
+* **Single‑ or multi‑project**: scaffold one project, a comma‑separated list, or **`--project all`** in dependency order.
+* **Clone/build/install external git libs** in the same CLI (`--libs-*` flags) with safe step sanitization.
+* **Export‑ready CMake** for libraries (regular or header‑only) with **variants** (`debug`, `memory`, `static`, `shared`) and coverage support.
+* **Apps & tests** scaffolding with unioned `find_package`/`link_libraries` computed once per suite.
+* **OSS hygiene**: inserts/updates SPDX headers, rebuilds NOTICE, ensures license texts match canonical copies.
+* **Idempotent**: shows a plan; updates are prompted unless `--assume-yes`. `.gitignore` is applied early so validation respects your ignores.
 
 ---
 
 ## What it does
 
-* **Applies templates** (Jinja2) into your repo:
+* **Applies templates** (Jinja2) into your repo(s):
 
-  * `CMakeLists.txt` for libraries (regular or header‑only).
-  * `BUILDING.md` and `build_install.sh` (multi‑variant, generator‑aware).
-  * Optional **tests** scaffold and **example apps** tree.
-  * Optional site bits (`_config.yml`, Jekyll layout), `.gitignore`, Changie config.
+  * `CMakeLists.txt` for libraries (regular or header‑only) with exported `*Config.cmake`.
+  * `build.sh` (generator‑aware) with `build`, `install`, `coverage`, and `clean`.
+  * Optional **tests/** scaffold and **apps/** trees (per “app context”).
+  * Optional docs/site/git/changelog bits (`BUILDING.md`, `_config.yml`, Jekyll layout, `.gitignore`, Changie config).
   * Optional Dockerfile that can build third‑party deps from source.
+
 * **Derives CMake deps** from a simple `libraries:` section:
 
-  * Populates `find_package(...)`, `target_link_libraries(...)`,
-    generates exported `*Config.cmake` + `*ConfigVersion.cmake`.
-  * Computes apt build packages for transitive **system** deps.
-* **Test + apps helpers**:
+  * Populates `find_package(...)`, `target_link_libraries(...)`, exported config dependencies, and apt build packages for **system** deps.
 
-  * Normalize `tests.targets` and compute suite‑level `find_package`/`link_libraries`.
-  * Normalize `apps` contexts and derive per‑suite linking once.
 * **Enforces OSS hygiene**:
 
-  * Adds/updates **SPDX license headers** at the top of source files (C/C++, CMake, Python, JS, CSS, HTML, etc.).
-  * (Re)builds a **NOTICE** file from license profiles.
-  * Ensures license texts exist and match canonical content.
-  * Supports **per‑path license profile overrides** and extra third‑party license files.
-* **Idempotent & cautious**:
+  * Adds/updates **SPDX license headers** at the top of supported file types (C/C++, CMake, Python, JS, CSS, HTML, etc.).
+  * (Re)builds a **NOTICE** file from actual profiles used in your tree (stable order).
+  * Ensures license texts match canonical resources; supports per‑path overrides and extras.
 
-  * First run writes files. On subsequent runs it shows a summary and asks before updating existing files.
-  * SPDX headers are managed automatically and kept out of the diff noise.
+* **Clones/builds external libraries** (when requested):
+
+  * Resolves dependency order across `kind: git` libs.
+  * Sanitizes library‐provided `build_steps` (skips `git clone`, `rm -rf`, and installs during a build‑only phase).
+  * Falls back to a generic CMake flow when no `build_steps` are provided.
 
 ---
 
 ## Quick start
 
-1. **Add a `scaffold-repo.yaml`** to the root of your C/C++ project. Minimal example:
+### 1) Single project (apply in‑place)
 
-   ```yaml
-   project_name: mylib
-   version: 0.1.0
-   language: "C"           # or "C CXX"
-   packages: [git, build, docs, tests, changie]   # pick what you want stamped
+```bash
+# from your project root (or pass a path)
+scaffold-repo .
+# or, if running as a module:
+python -m scaffold_repo.scaffold_repo .
+```
 
-   cmake:
-     kind: library
-     sources:
-       - src/foo.c
-       - src/bar.c
+*Review the summary; approve updates when prompted. Then build:*
 
-   # Tell scaffold-repo what your lib depends on; it will derive CMake bits:
-   libraries:
-     - name: mylib
-       depends_on: [ZLIB, OpenSSL]
+```bash
+./build.sh install
+```
 
-     - name: ZLIB
-       kind: system
-       find_package: "ZLIB REQUIRED"
-       link: "ZLIB::ZLIB"
-       pkg: zlib1g-dev
+### 2) Multi‑project (monorepo‑style)
 
-     - name: OpenSSL
-       kind: system
-       find_package: "OpenSSL REQUIRED"
-       link: "OpenSSL::Crypto"
-       pkg: libssl-dev
-   ```
+```bash
+# write each requested project into <ROOT>/repos/<slug>/
+scaffold-repo /path/to/mono --project "the-io-library,a-json-library" --assume-yes
+# all “git_build” libraries, in dependency order:
+scaffold-repo /path/to/mono --project all --assume-yes
+```
 
-2. **Run the tool** (from the project root):
+### 3) External git libraries (clone/build/install)
 
-   ```bash
-   # If installed with an entrypoint:
-   scaffold-repo .
+```bash
+# after scaffolding (or independently), build third‑party libs described in the config
+scaffold-repo /path/to/mono --libs-install
+# only some libs:
+scaffold-repo /path/to/mono --libs-install --libs-only "restinio,fmt,asio"
+# build (no install):
+scaffold-repo /path/to/mono --libs-build
+# clone only:
+scaffold-repo /path/to/mono --libs-clone
+```
 
-   # Or via Python:
-   python -m scaffold_repo.cli .
-   ```
-
-3. Review the summary, approve updates (if prompted), and **commit** the changes.
-
-4. Build your project:
-
-   ```bash
-   ./build_install.sh              # one-shot build+install (multi-variant)
-   # or:
-   mkdir build && cd build
-   cmake .. -DCMAKE_BUILD_TYPE=Release
-   cmake --build . -j"$(nproc)"
-   sudo cmake --install .
-   ```
+> **Bring your own templates/config:** pass `--templates_dir /path/to/templates`.
+> The loader reads `templates_dir/scaffold-repo.yaml` and all templates under that directory; otherwise it uses the package’s built‑in defaults.
 
 ---
 
@@ -98,192 +91,31 @@ A small, batteries‑included tool to **stamp opinionated templates into a C/C++
 
 ```
 scaffold-repo [REPO=.]
-  --fix-licenses           Apply fixes for SPDX/NOTICE/license texts during validation
-  --no-prompt              Do not prompt while fixing SPDX headers (license step)
-  --notice-file NAME       NOTICE file name (default: NOTICE)
-  --decisions PATH         Path to JSON cache for SPDX replacement decisions
-  --format text|json       Output validation summary (default: text)
+  --project NAME[,NAME...]    Scaffold a specific set of projects
+                              (use 'all' for every git_build project in dep order)
+  --templates_dir PATH        Override templates root (must contain scaffold-repo.yaml)
+
+  --assume-yes, -y            Apply file updates without prompting
+  --show-diffs                Show diffs for updates before applying
+  --no-prompt                 Do not prompt during SPDX header fixups
+  --notice-file NAME          NOTICE filename (default: NOTICE)
+  --decisions PATH            Path to JSON cache for SPDX replacement decisions
+  --format text|json          Output format for results
+
+  # External libraries (clone/build/install)
+  --libs-clone                Clone only
+  --libs-build                Clone + build (no install)
+  --libs-install              Clone + build + install (default if any --libs-* given)
+  --libs-only NAMES           Comma-separated subset of library names/slugs
 ```
 
-* **Exit code:** `0` success, `1` if validation issues remain, `2/3` on config/template errors.
+**Exit codes:** `0` success; `1` if validation issues remain; `2/3` on config/template errors.
 
 ---
 
-## What gets generated (by package)
+## Templates & configuration
 
-Enable a package by listing it under `packages:` in `scaffold-repo.yaml`.
-
-| Package    | Files (relative to repo root)                   |
-| ---------- | ----------------------------------------------- |
-| `git`      | `.gitignore`                                    |
-| `build`    | `build_install.sh`                              |
-| `docs`     | `BUILDING.md`                                   |
-| `tests`    | `tests/**` (CMake + your targets)               |
-| `changie`  | `.changie.yaml`, `.changes/**`                  |
-| `site`     | `_config.yml`, `_layouts/default.html`          |
-| *(always)* | `CMakeLists.txt`, `LICENSE`, `README.md` (stub) |
-
-> Tip: Skip `site` if you already manage `_config.yml`/`_layouts`; skip `docs` if you maintain your own `BUILDING.md`.
-
----
-
-## `scaffold-repo.yaml` reference (most common keys)
-
-Top‑level:
-
-```yaml
-project_name: mylib
-project_title: My Library          # optional, cosmetic
-version: 0.1.0
-language: "C" or "C CXX"
-c_standard: 99                     # default 99
-cxx_standard: 17                   # default 17 (when CXX enabled)
-pic: true                          # default true
-license_spdx: Apache-2.0           # token used in notices
-author: "Your Name"
-email: you@example.com
-date: 2025-08-08                   # used to compute year for notices
-packages: [git, build, docs, tests, changie, site]
-templates_dir: ./my-templates      # optional: your own template root
-```
-
-### `cmake:` (project build)
-
-```yaml
-cmake:
-  kind: library            # or "header_only"
-  sources: [src/foo.c, ...]
-  default_variant: debug   # affects export/import name selection
-  find_packages: ["ZLIB REQUIRED", ...]    # filled automatically when possible
-  link_libraries: ["ZLIB::ZLIB", ...]      # filled automatically when possible
-  deps_for_config: [ZLIB]                  # used in generated *Config.cmake
-  apt_packages: [zlib1g-dev, ...]          # derived from libraries (system deps)
-  apt_dev_packages: [valgrind, ...]        # dev tools; get added to Dockerfile
-```
-
-* **Header‑only**: set `kind: header_only`; optional `namespace`, `header_only_c_std`, and `header_only_config_in` are supported.
-
-### `libraries:` (single source of truth for deps)
-
-Describe project + third‑party deps. You can mix:
-
-* **system** libraries:
-
-  ```yaml
-  - name: ZLIB
-    kind: system
-    find_package: "ZLIB REQUIRED"
-    link: "ZLIB::ZLIB"
-    pkg: zlib1g-dev
-  ```
-
-* **git** / **tar** sources (built in Dockerfile and shown in BUILDING.md):
-
-  ```yaml
-  - name: asio
-    kind: git
-    url: https://github.com/chriskohlhoff/asio.git
-    branch: asio-1-30-2
-    build_steps:
-      - git clone --depth 1 --branch asio-1-30-2 --single-branch "https://..." "asio"
-      - cd asio/asio
-      - ./autogen.sh
-      - cd ../../
-      - mkdir -p build/asio
-      - cd build/asio
-      - ../../asio/asio/configure --prefix=/usr/local
-      - make -j"$(nproc)"
-      - sudo make install
-    find_package: "asio REQUIRED"
-    link: "asio::asio"
-  ```
-
-* **Project library**: add an entry **named like your project** and declare its direct deps:
-
-  ```yaml
-  - name: mylib
-    depends_on: [ZLIB, OpenSSL]   # names resolved slug/underscore-insensitively
-  ```
-
-`scaffold-repo` resolves transitive deps, orders them, and populates `cmake.find_packages`, `cmake.link_libraries`, `cmake.deps_for_config`, and a list of apt packages for **system** deps.
-
-### `tests:` (optional)
-
-```yaml
-tests:
-  depends_on: [mylib]   # optional; defaults to the project lib
-  targets:
-    - smoke             # => tests/src/smoke.c
-    - hello_world
-    - custom:
-        sources: [tests/src/custom.c]
-        depends_on: [ZLIB]    # widens the union for suite deps
-```
-
-* Targets become `add_executable(...)` and `add_test(...)`.
-* Suite‑level `find_package`/`link_libraries` are derived once from the union of deps.
-
-### `apps:` (optional example binaries)
-
-```yaml
-apps:
-  context:
-    dest: examples                 # base dir (default: apps)
-    depends_on: [mylib]
-  echo_server:
-    dest: 01_echo                  # per-context override; under base
-    binaries:
-      - echo
-      - special:
-          sources: [examples/01_echo/src/special.c]
-          link_libraries: ["mylib::mylib"]    # optional per-binary override
-```
-
-Each app context gets:
-
-* A dedicated `CMakeLists.txt` with suite‑level `find_package`/`link_libraries` derived once.
-* Default sources under `<dest>/src/<name>.c` if you provide a bare name.
-
-### Licensing & NOTICE
-
-```yaml
-license_profile: company-default
-license_overrides:
-  "third_party/**": third-party
-
-licenses:
-  company-default:
-    spdx: |
-      SPDX-FileCopyrightText: 2024–{{ year }} Your Co
-      SPDX-License-Identifier: Apache-2.0
-    license: LICENSE
-    license_canonical: resources/licenses/Apache-2.0.txt
-    notice_template: resources/notices/standard_notice.j2
-    # or inline:
-    notice: |
-      {{ project_name }} © {{ year }} Your Co
-      Licensed under Apache-2.0 (see LICENSE)
-
-  third-party:
-    spdx: |
-      SPDX-FileCopyrightText: 2017–{{ year }} Upstream
-      SPDX-License-Identifier: BSD-3-Clause
-    extra_licenses:
-      - path: LICENSE.upstream
-        canonical: resources/licenses/BSD-3-Clause.txt
-```
-
-* **SPDX headers** are inserted at the top of supported file types using the correct comment style.
-* **NOTICE** is rebuilt from profiles actually used in the repo.
-* **License texts** in `license` and any `extra_licenses` are kept in sync with canonical resources.
-
----
-
-## Templating & customization
-
-* Templates are Jinja2. You can point to **your own** tree via `templates_dir:` in `scaffold-repo.yaml`.
-
-* Templates may carry a tiny front‑matter (YAML inside a Jinja comment) to set context/destination, but you rarely need to touch that. Example:
+* Templates are Jinja2. Each template may include tiny front‑matter:
 
   ```jinja
   {#- scaffold-repo:
@@ -294,89 +126,150 @@ licenses:
     -#}
   ```
 
-* Contexts used by the built‑ins:
+  * `context` selects a render context (e.g., `.`, `cmake`, `tests`, `apps.<name>`).
+  * `dest` overrides the output path.
+  * `updatable` controls whether a rendered file is auto‑eligible for updates next runs.
+  * `header_managed` tells the diff engine to ignore SPDX headers when comparing.
 
-  * `.` (base), `cmake`, `tests`, and `apps.<name>` (one per app context).
+* The primary model lives in `scaffold-repo.yaml` (in your `--templates_dir` or the packaged defaults). It defines:
+
+  * Top‑level project knobs (language, standards, etc.).
+  * A `libraries:` list for your project and its deps:
+
+    * `kind: system` (with `find_package`/`link`/`pkg`)
+    * `kind: git` (with `url`, optional `branch`, `dir`, `build_steps`)
+    * Optional `template: git_build` to inherit common settings.
+  * `tests:` targets and `apps:` contexts (both get dependency derivations).
+  * Licensing profiles (`licenses:`), overrides and extras.
 
 ---
 
-## The build script (`build_install.sh`)
+## CMake & build
 
-* Detects a generator (prefers Ninja), creates **variant** builds (`debug`, `memory`, `coverage`, `static`, `shared`), and installs all.
-* Useful knobs (env vars): `GENERATOR`, `VARIANTS`, `PREFIX`, `SKIP`, `CLEAN`, `AUTO_CLEAN`, `EXTRA_CMAKE_ARGS`.
-* CMake exposes `A_BUILD_VARIANT` so your exported package can select the right imported target.
+### Library flavors
+
+* **Header‑only** (`kind: header_only`): generates an `INTERFACE` target and exported config.
+* **Compiled library**: generates four variants — `debug`, `memory`, `static`, `shared` — **all built and installable**.
+  An umbrella target **`<name>::<name>`** points to the selected variant during in‑tree builds.
+
+**Variant selection in consumers** is handled by the exported config via:
+
+```cmake
+set(A_BUILD_VARIANT "debug") # or memory|static|shared
+find_package(<name> CONFIG REQUIRED)
+target_link_libraries(myexe PRIVATE <name>::<name>)
+```
+
+### Coverage
+
+* Enable coverage for developers with `-DA_ENABLE_COVERAGE=ON` (Clang and GCC supported).
+* Tests include a `coverage_report` target that emits an HTML report.
+
+### Build script (`build.sh`)
+
+```bash
+./build.sh build      # default
+./build.sh install
+./build.sh coverage   # builds tests, runs them, and emits HTML coverage
+./build.sh clean
+```
+
+* Auto‑detects a generator (prefers Ninja; falls back to Unix Makefiles).
+* Knobs via env vars: `PREFIX`, `BUILD_DIR`, `BUILD_TYPE`, `GENERATOR`.
+
+---
+
+## Tests
+
+Define **suite targets** under `tests:`; the tool normalizes simple forms:
+
+```yaml
+tests:
+  targets:
+    - smoke                 # -> tests/src/smoke.c
+    - custom:
+        sources: [tests/src/custom.c]
+        depends_on: [ZLIB]  # widens the suite’s dependency union
+```
+
+The suite’s `find_package` and `link_libraries` are derived once from the union of targets and any `tests.depends_on`.
+
+---
+
+## Apps
+
+Add **app contexts** under `apps:` to build example/demo binaries. The tool computes suite‑level deps once and renders a small apps project:
+
+```yaml
+apps:
+  context:
+    dest: examples                  # base dir (default: apps)
+    depends_on: [the-io-library]    # defaults to the project lib if omitted
+  map-reduce:
+    binaries:
+      - dump_files_1
+      - list_files
+```
+
+Each context gets its own `CMakeLists.txt` and a helper `build.sh`.
+
+---
+
+## External git libraries (optional phase)
+
+Describe third‑party source deps in `libraries:` with `kind: git`. You can provide `build_steps` (shell lines), or rely on the **generic CMake fallback**. The **`--libs-*`** flags:
+
+* Compute a dependency‑ordered plan.
+* **Sanitize** steps (we manage clones; `rm -rf` is skipped; install steps are removed in `--libs-build`).
+* Respect a `dir` hint for nested source layouts, and use `--branch`/`--depth 1` when configured.
+* Provide `nproc` fallbacks on macOS/BSD.
+
+---
+
+## OSS hygiene (SPDX/NOTICE/licenses)
+
+* Inserts or updates SPDX headers at the top of supported files (correct comment style per language).
+* Keeps a **NOTICE** file built from the profiles actually exercised by your tree (default profile first, then first‑seen order).
+* Ensures license text files match canonical content (`license_canonical`), and will create/update them as needed.
+* Honors per‑path **profile overrides** and **extras** (e.g., third‑party headers or separate license files).
+* Respects your `.gitignore` (applied early).
+  Use `--decisions` to cache “replace this header with that one” choices across runs.
 
 ---
 
 ## Dockerfile (optional)
 
-* Installs base build tools + a chosen CMake version.
-* Optionally installs your `cmake.apt_dev_packages`.
-* For `libraries` with `kind: git`/`tar` and `build_steps`, the Dockerfile emits those steps to build/install deps before building your project.
-* Build args: `UBUNTU_TAG`, `CMAKE_VERSION`, `CMAKE_BASE_URL`, `GITHUB_TOKEN`.
+A generated Dockerfile:
+
+* Installs build tools and a specific CMake version.
+* Optionally installs `cmake.apt_dev_packages`.
+* Emits your `kind: git` libraries’ `build_steps` to build/install them.
+* Builds and installs your project.
 
 ---
 
-## Idempotence, prompts & state
+## Idempotence & prompts
 
-* On each run you get two summaries:
-
-  * **Jinja templates** (rendered files).
-  * **Non‑Jinja files** (verbatim copies).
-* First run applies everything. On later runs, updates are **interactive**.
-* After applying, the tool auto‑runs OSS validation with silent fixes to add missing SPDX headers.
-* State is recorded in **`.scaffold-repo.yaml`** (content/template hashes). It’s safe to commit.
+* You’ll see two summaries: **Jinja templates** (rendered) and **non‑Jinja files** (verbatim copies).
+* Jinja updates are **batched** behind one prompt; non‑Jinja updates prompt individually.
+* Pass `--assume-yes` to apply without prompting, and `--show-diffs` to view diffs inline.
+* After applying, the tool immediately runs OSS fixes silently (so SPDX/NOTICE stay coherent).
 
 ---
 
-## Typical workflows
+## Examples
 
-* **Bootstrap a new lib**: write minimal `scaffold-repo.yaml`, run `scaffold-repo`, push.
-* **Add a new dep**: update `libraries:`, re‑run; CMake + BUILDING/Dockerfile update.
-* **Add tests**: add `tests:` with targets; enable `tests` package; re‑run.
-* **Add example apps**: add `apps:` contexts; re‑run.
-* **Enforce licenses in CI**: run with `--format json`; fail the job if exit code is `1`.
+```bash
+# Scaffold two projects into a monorepo, then build external libs
+scaffold-repo ~/work/mono --project "the-io-library,a-json-library" -y --show-diffs
+scaffold-repo ~/work/mono --libs-install
 
----
+# Apply templates to an existing single repo (in-place)
+scaffold-repo . -y --show-diffs
 
-## FAQ (short)
-
-* **Will it overwrite my files?**
-  It asks before updating existing files (after the first run). SPDX headers are managed automatically.
-
-* **How do I skip pieces?**
-  Remove packages from `packages:` (e.g., drop `site` or `docs`).
-
-* **Do I need to vendor the `resources/` tree?**
-  No. Canonical license texts are embedded in the tool. You can still opt to stamp them by enabling a custom package mapping.
-
-* **How do I use my own templates?**
-  Set `templates_dir:` to your folder. Same file names/contexts will be picked up.
-
----
-
-## Example: tiny project
-
-```yaml
-project_name: hello-c
-version: 0.1.0
-packages: [git, build, docs]
-
-cmake:
-  kind: library
-  sources: [src/hello.c]
-
-libraries:
-  - name: hello-c       # the project
-    depends_on: [ZLIB]
-  - name: ZLIB
-    kind: system
-    find_package: "ZLIB REQUIRED"
-    link: "ZLIB::ZLIB"
-    pkg: zlib1g-dev
+# Use your own template pack
+scaffold-repo ~/work/mono --project all --templates_dir ~/my-templates -y
 ```
-
-Run `scaffold-repo .`, then `./build_install.sh`.
 
 ---
 
@@ -386,5 +279,3 @@ This tool’s templates default to **Apache‑2.0** and include helpers for othe
 Your generated repositories can use whatever license you configure via `licenses:`.
 
 ---
-
-**That’s it.** Point `scaffold-repo.yaml` at what you need; `scaffold-repo` will keep your C/C++ repo coherent, buildable, and compliant.
