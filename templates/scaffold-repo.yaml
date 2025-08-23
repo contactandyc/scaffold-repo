@@ -40,7 +40,7 @@ contributors:
     name: Andy Curtis
     email: contactandyc@gmail.com
     linkedin: linkedin.com/in/andycurtis
-    github: github.com/andycurtis-public/
+    github: github.com/contactandyc
     contact: "{{ name }} <{{ email }}>"
     author: "{{ name }} <{{ email }}> {{ linkedin }} {{ github }}"
   knode:
@@ -50,7 +50,7 @@ contributors:
 
 license_profile: andy
 # github_project: knode-ai-open-source
-github_project: andycurtis-public
+github_project: contactandyc
 
 licenses:
   knode-andy-maintainer:
@@ -131,6 +131,24 @@ licenses:
     notice: |
       {{ project_title }} © 2025 {{ contributors.andy_curtis.contact }}
       Licensed under Apache-2.0 (see LICENSE)
+
+  gcloud-api:
+    spdx: |
+      SPDX-FileCopyrightText: 2025 {{ contributors.andy_curtis.contact }}
+      SPDX-License-Identifier: Apache-2.0
+
+      SPDX-FileComment: This project is an independent library for interacting with the Google and Google Cloud API.
+      It is not affiliated with, endorsed by, or sponsored by Google.
+      "Google" and related marks are trademarks of Alphabet.
+    license: LICENSE
+    license_canonical: resources/licenses/Apache-2.0.txt
+    notice: |
+      {{ project_title }} © 2025 {{ contributors.andy_curtis.contact }}
+      Licensed under Apache-2.0 (see LICENSE)
+
+      NON-AFFILIATION: This software is an independent library for interacting with the Google and Google Cloud API.
+      It is not affiliated with, endorsed by, or sponsored by Google. "Google" and related marks
+      are trademarks of Alphabet
 
   openai-api:
     spdx: |
@@ -250,10 +268,10 @@ libraries:
 
   - name: fmt
     kind: git
-    url: https://github.com/andycurtis-public/restinio.git
+    url: https://github.com/contactandyc/restinio.git
     dir: restinio/fmt
     build_steps:
-      - git clone --depth 1 "https://github.com/andycurtis-public/restinio.git" "restinio"
+      - git clone --depth 1 "https://github.com/contactandyc/restinio.git" "restinio"
       - mkdir -p build/fmt
       - cd build/fmt
       - cmake ../../restinio/fmt
@@ -266,10 +284,10 @@ libraries:
 
   - name: expected-lite
     kind: git
-    url: https://github.com/andycurtis-public/restinio.git
+    url: https://github.com/contactandyc/restinio.git
     dir: restinio/expected-lite
     build_steps:
-      - git clone --depth 1 "https://github.com/andycurtis-public/restinio.git" "restinio"
+      - git clone --depth 1 "https://github.com/contactandyc/restinio.git" "restinio"
       - mkdir -p build/expected-lite
       - cd build/expected-lite
       - cmake ../../restinio/expected-lite
@@ -282,11 +300,11 @@ libraries:
 
   - name: restinio
     kind: git
-    url: https://github.com/andycurtis-public/restinio.git
+    url: https://github.com/contactandyc/restinio.git
     branch: v.0.7.3-fork
     dir: restinio/dev
     build_steps:
-      - git clone --depth 1 --branch v.0.7.3-fork --single-branch "https://github.com/andycurtis-public/restinio.git" "restinio"
+      - git clone --depth 1 --branch v.0.7.3-fork --single-branch "https://github.com/contactandyc/restinio.git" "restinio"
       - mkdir -p build/restinio
       - cd build/restinio
       - cmake ../../restinio/dev -DRESTINIO_SAMPLE=OFF -DRESTINIO_TEST=OFF -DRESTINIO_DEP_FMT=system -DRESTINIO_DEP_EXPECTED_LITE=system
@@ -413,10 +431,11 @@ libraries:
       - a-json-library
       - CURL
 
-  - name: an-openai-api-library
-    project_title: An OpenAI API Library
+  - name: a-curl-openai-plugin
+    project_title: An OpenAI API Plugin for a-curl-library
     version: 0.0.1
     template: git_build
+    license_profile: openai-api
     depends_on:
       - a-curl-library
       - a-json-schema-builder-library
@@ -424,7 +443,7 @@ libraries:
       context:
         dest: examples
         depends_on:
-          - an-openai-api-library
+          - a-curl-openai-plugin
       embeddings:
         binaries:
           - embed_test

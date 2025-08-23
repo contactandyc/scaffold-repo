@@ -9,3 +9,4 @@ demo-lib
 repos
 __pycache__
 repos
+cmake_uninstall.cmake.in
