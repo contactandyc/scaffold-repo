@@ -1,0 +1,35 @@
+# ── Global Defaults (Bypasses the wrapper to reach the root config) ──
+root:
+  repo_flavor: cmake-c
+  cmake_min_version: "3.20"
+  c_standard: 23
+  language: C
+  pic: true
+  need_libm: false
+  cmake:
+    kind: library
+  tests:
+    kind: tests
+
+  # C-Specific Development Tools
+  dev_packages:
+    valgrind: true
+    gdb: true
+    perl: true
+    autoconf: true
+    automake: true
+    libtool: true
+
+# ── The Template Payload (Gets wrapped as the library template) ──
+kind: git
+url: https://github.com/{{ github_project }}/{{ name }}.git
+shallow: true
+build_steps:
+  - git clone --depth 1 "https://github.com/{{ github_project }}/{{ name }}.git" "{{ name }}"
+  - cd {{ name }}
+  - ./build.sh clean
+  - ./build.sh install
+  - cd ..
+  - rm -rf {{ name }}
+find_package: "{{ project_name }} CONFIG REQUIRED"
+link: "{{ project_name }}::{{ project_name }}"

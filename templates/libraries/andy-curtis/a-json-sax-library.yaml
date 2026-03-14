@@ -1,0 +1,9 @@
+project_title: A JSON SAX Library
+version: 0.0.1
+
+profile: andy-curtis/andy-curtis
+template: cmake-c-git
+
+depends_on:
+  - andy-curtis/a-memory-library
+  - andy-curtis/the-macro-library

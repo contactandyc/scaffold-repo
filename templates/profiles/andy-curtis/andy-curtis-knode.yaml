@@ -1,0 +1,11 @@
+includes:
+  - profiles/andy-curtis/andy-curtis.yaml
+
+# Add the Knode License default!
+license_profile: andy-curtis/knode-shared-19
+
+contributors:
+  knode:
+    name: Knode.ai
+    website: https://www.knodeai.com/
+    contact: "{{ name }}"

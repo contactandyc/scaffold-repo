@@ -1,0 +1,128 @@
+{#- scaffold-repo: cmake -#}
+# CMakeLists.txt for tests
+cmake_minimum_required(VERSION {{ cmake_min_version | default("3.20") }})
+
+project({{ cmake_project }}_tests LANGUAGES {{ language | default("C") }})
+
+set(A_BUILD_VARIANT "debug" CACHE STRING
+    "Variant to link via {{ cmake_project }}::{{ cmake_project }} (debug|memory|static|shared)")
+set_property(CACHE A_BUILD_VARIANT PROPERTY STRINGS debug memory static shared)
+
+option(A_ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
+
+find_library(M_LIB m)
+
+# ---- Test executables ----
+set(TEST_EXECUTABLES "")
+{% for tgt in test_targets or [] %}
+add_executable({{ tgt.name }}
+{%- for s in tgt.sources %}
+  {{ s }}
+{%- endfor %}
+)
+
+{% if tgt.include_dirs %}
+target_include_directories({{ tgt.name }} PRIVATE
+{%- for d in tgt.include_dirs %}
+  ${CMAKE_CURRENT_SOURCE_DIR}/{{ d }}
+{%- endfor %}
+)
+{% endif %}
+
+list(APPEND TEST_EXECUTABLES {{ tgt.name }})
+
+set_target_properties({{ tgt.name }} PROPERTIES
+  C_STANDARD {{ c_standard | default(17) }}
+  C_STANDARD_REQUIRED YES
+)
+if("CXX" IN_LIST CMAKE_PROJECT_LANGUAGES)
+  set_target_properties({{ tgt.name }} PROPERTIES
+    CXX_STANDARD {{ cxx_standard | default(17) }}
+    CXX_STANDARD_REQUIRED YES
+  )
+endif()
+
+if(NOT TARGET {{ cmake_project }}::{{ cmake_project }})
+  find_package({{ cmake_project }} CONFIG REQUIRED)
+endif()
+target_link_libraries({{ tgt.name }} PRIVATE {{ cmake_project }}::{{ cmake_project }})
+
+if(M_LIB)
+  target_link_libraries({{ tgt.name }} PRIVATE ${M_LIB})
+endif()
+
+if(MSVC)
+  target_compile_options({{ tgt.name }} PRIVATE /W4)
+else()
+  target_compile_options({{ tgt.name }} PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(A_ENABLE_COVERAGE)
+  if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options({{ tgt.name }} PRIVATE -O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    target_link_options({{ tgt.name }} PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options({{ tgt.name }} PRIVATE -O0 -g --coverage)
+    target_link_options({{ tgt.name }} PRIVATE --coverage)
+  endif()
+endif()
+
+add_test(NAME {{ tgt.name }} COMMAND $<TARGET_FILE:{{ tgt.name }}>)
+{% endfor %}
+
+enable_testing()
+
+# ---- Coverage aggregation ----
+add_custom_target(coverage_report COMMENT "Generate coverage report")
+
+if(A_ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+  include(ProcessorCount)
+  ProcessorCount(NPROC)
+  if(NPROC EQUAL 0)
+    set(NPROC 4)
+  endif()
+
+  add_custom_command(TARGET coverage_report PRE_BUILD
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -j ${NPROC}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running tests with coverage instrumentation"
+  )
+
+  find_program(LLVM_PROFDATA_EXECUTABLE llvm-profdata)
+  find_program(LLVM_COV_EXECUTABLE llvm-cov)
+  if(LLVM_PROFDATA_EXECUTABLE AND LLVM_COV_EXECUTABLE)
+    add_custom_command(TARGET coverage_report POST_BUILD
+      COMMAND ${LLVM_PROFDATA_EXECUTABLE} merge -sparse *.profraw -o default.profdata
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+      COMMENT "Merging coverage data"
+    )
+
+    {% if kind == "header_only" %}
+    # For header-only, report coverage from all test executables
+    foreach(tgt IN LISTS TEST_EXECUTABLES)
+      add_custom_command(TARGET coverage_report POST_BUILD
+        COMMAND ${LLVM_COV_EXECUTABLE} show
+                $<TARGET_FILE:${tgt}>
+                -instr-profile=default.profdata
+                -format=html -output-dir=coverage_html
+                --ignore-filename-regex='/usr/.*'
+                --show-regions --show-line-counts-or-regions
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Generated LLVM coverage report for ${tgt} → open coverage_html/index.html"
+      )
+    endforeach()
+    {% else %}
+    # Normal compiled library path
+    add_custom_command(TARGET coverage_report POST_BUILD
+      COMMAND ${LLVM_COV_EXECUTABLE} show
+              ../lib{{ cmake_project }}_${A_BUILD_VARIANT}.a
+              -instr-profile=default.profdata
+              -format=html -output-dir=coverage_html
+              --ignore-filename-regex='/usr/.*'
+              --show-regions --show-line-counts-or-regions
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+      COMMENT "Generated LLVM coverage report → open coverage_html/index.html"
+    )
+    {% endif %}
+  endif()
+endif()

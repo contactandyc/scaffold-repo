@@ -1,0 +1,8 @@
+spdx: |
+  SPDX-FileCopyrightText: 2025-{{ year }} {{ contributors.andy_curtis.contact }}
+  SPDX-License-Identifier: Apache-2.0
+license: LICENSE
+license_canonical: resources/licenses/Apache-2.0.txt
+notice: |
+  {{ project_title }} © 2025-{{ year }} {{ contributors.andy_curtis.contact }}
+  Licensed under Apache-2.0 (see LICENSE)

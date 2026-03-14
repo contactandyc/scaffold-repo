@@ -1,0 +1,4 @@
+kind: system
+find_package: "ZLIB REQUIRED"
+link: "ZLIB::ZLIB"
+pkg: zlib1g-dev

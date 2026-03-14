@@ -1,0 +1,64 @@
+{#- scaffold-repo: cmake -#}
+cmake_minimum_required(VERSION {{ cmake_min_version | default("3.20") }})
+
+# A small "apps" project that builds example/demo binaries.
+project({{ app_project_name }} LANGUAGES {{ app_languages | default(language | default("C")) }})
+
+# Optional math lib on POSIX
+find_library(M_LIB m)
+
+# Bring in suite-level dependencies derived by the renderer
+{% for fp in find_packages or [] %}
+find_package({{ fp }})
+{% endfor %}
+
+# ---- Binaries ----
+{% for app in binaries or [] %}
+add_executable({{ app.name }}
+{%- for s in app.sources %}
+  {{ s }}
+{%- endfor %}
+)
+
+{% if app.include_dirs %}
+target_include_directories({{ app.name }} PRIVATE
+{%- for d in app.include_dirs %}
+  ${CMAKE_CURRENT_SOURCE_DIR}/{{ d }}
+{%- endfor %}
+)
+{% endif %}
+
+# Language standards
+set_target_properties({{ app.name }} PROPERTIES
+  C_STANDARD {{ c_standard | default(17) }}
+  C_STANDARD_REQUIRED YES
+)
+if("CXX" IN_LIST CMAKE_PROJECT_LANGUAGES)
+  set_target_properties({{ app.name }} PROPERTIES
+    CXX_STANDARD {{ cxx_standard | default(17) }}
+    CXX_STANDARD_REQUIRED YES
+  )
+endif()
+
+# Link the union of deps computed for this app context
+target_link_libraries({{ app.name }} PRIVATE
+{%- for l in link_libraries or [] %}
+  {{ l }}
+{%- endfor %}
+)
+
+# Optional libm
+if(M_LIB)
+  target_link_libraries({{ app.name }} PRIVATE ${M_LIB})
+endif()
+
+# Warnings
+if(MSVC)
+  target_compile_options({{ app.name }} PRIVATE /W4)
+else()
+  target_compile_options({{ app.name }} PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Install each app binary (handy for packaging examples)
+install(TARGETS {{ app.name }} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+{% endfor %}

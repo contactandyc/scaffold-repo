@@ -1,0 +1,11 @@
+project_title: H2O C Library
+version: 0.0.1
+
+profile: andy-curtis/andy-curtis
+template: cmake-c-git
+
+language: C CXX
+depends_on:
+  - common/h2o
+  - common/libuv
+  - system/OpenSSL

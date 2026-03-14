@@ -1,0 +1,6 @@
+kind: system
+find_package: "OpenSSL REQUIRED"
+link:
+  - OpenSSL::Crypto
+  - OpenSSL::SSL
+pkg: libssl-dev

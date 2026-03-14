@@ -6,7 +6,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 from jinja2 import Environment
 
@@ -19,27 +19,18 @@ from .config_reader import (
 )
 import yaml
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Public entrypoints
-# ──────────────────────────────────────────────────────────────────────────────
 
 def verify_repo(
-    repo: Path,
-    *,
-    fix_licenses: bool = False,
-    no_prompt: bool = False,
-    notice_file: str = "NOTICE",
-    include_exts: Optional[Set[str]] = None,
-    decisions_path: Optional[Path] = None,
-    project_name: Optional[str] = None,
-    templates_dir: Optional[str] = None,
-    assume_yes: bool = False,
-    show_diffs: bool = False,
-) -> Tuple[int, Dict[str, Any]]:
-    """
-    One-shot workflow: apply templates then validate OSS.
-    Returns (exit_code, validation_result_dict).
-    """
+        repo: Path,
+        *,
+        fix_licenses: bool = False,
+        no_prompt: bool = False,
+        include_exts: set[str] | None = None,
+        project_name: str | None = None,
+        templates_dir: str | None = None,
+        assume_yes: bool = False,
+        show_diffs: bool = False,
+) -> tuple[int, dict[str, Any]]:
     rc_apply = apply_repo(
         repo,
         project_name=project_name,
@@ -47,9 +38,8 @@ def verify_repo(
         assume_yes=assume_yes,
         show_diffs=show_diffs,
     )
-    # Run validation (again) in requested mode (fix or report-only)
-    reader = ConfigReader(repo, project_name=project_name,
-                          templates_dir=templates_dir)
+
+    reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir)
     reader.load()
     res = validate_licenses(
         repo,
@@ -58,25 +48,19 @@ def verify_repo(
         include_exts=include_exts,
         apply_fixes=fix_licenses,
         no_prompt=no_prompt,
-        decisions_path=decisions_path,
-        notice_file=notice_file,
     )
     exit_code = rc_apply if rc_apply != 0 else (1 if res.get("issues") else 0)
     return exit_code, res
 
 
 def apply_repo(
-    repo: Path,
-    *,
-    project_name: Optional[str] = None,
-    templates_dir: Optional[str] = None,
-    assume_yes: bool = False,
-    show_diffs: bool = False,
+        repo: Path,
+        *,
+        project_name: str | None = None,
+        templates_dir: str | None = None,
+        assume_yes: bool = False,
+        show_diffs: bool = False,
 ) -> int:
-    """
-    Render templates → show summary/prompt → write files (+x preserved).
-    Also runs an immediate silent OSS fix pass if anything changed.
-    """
     repo = Path(repo).resolve()
     reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir)
     try:
@@ -88,10 +72,8 @@ def apply_repo(
     jinja_plan = reader.plan_jinja(show_diffs=show_diffs)
     copy_plan = reader.plan_copy(show_diffs=show_diffs)
 
-    # Apply .gitignore/.gitignore.j2 immediately so validation respects it
-    state: Dict[str, Any] = {}
-    early = [i for i in (jinja_plan + copy_plan)
-             if i.path == ".gitignore" and i.status in ("create", "update")]
+    state: dict[str, Any] = {}
+    early = [i for i in (jinja_plan + copy_plan) if i.path == ".gitignore" and i.status in ("create", "update")]
     if early:
         print("\nApplying .gitignore early …")
         _apply_items(repo, early, state)
@@ -101,10 +83,7 @@ def apply_repo(
     _print_summary("Jinja templates (*.j2 → rendered)", jinja_plan)
     _print_summary("Non-Jinja files (verbatim copy)", copy_plan)
 
-    # Decide what to apply
-    jinja_to_apply = [
-        i for i in jinja_plan if i.status in ("create", "update") and (i.status == "create" or i.updatable)
-    ]
+    jinja_to_apply = [i for i in jinja_plan if i.status in ("create", "update") and (i.status == "create" or i.updatable)]
     j_updates = [i for i in jinja_to_apply if i.status == "update"]
 
     if j_updates:
@@ -121,7 +100,7 @@ def apply_repo(
             if ans not in ("y", "yes"):
                 jinja_to_apply = [i for i in jinja_to_apply if i.status == "create"]
 
-    copy_to_apply: List[Any] = []
+    copy_to_apply: list[Any] = []
     for it in copy_plan:
         if it.status == "create":
             copy_to_apply.append(it)
@@ -138,37 +117,30 @@ def apply_repo(
                 if ans in ("y", "yes"):
                     copy_to_apply.append(it)
 
-    # Apply file changes
     _apply_items(repo, jinja_to_apply, state)
     _apply_items(repo, copy_to_apply, state)
 
     changed = bool(jinja_to_apply or copy_to_apply)
 
     if changed:
-        # Immediate silent fix to keep SPDX/NOTICE coherent
         validate_licenses(
             repo,
             cfg=reader.effective_config,
             resource_reader=reader.read_resource_text,
             apply_fixes=True,
             no_prompt=True,
-            notice_file="NOTICE",
         )
 
     return 0
 
 
 def _make_gitignore_matcher(repo: Path):
-    """
-    Return a callable(rel_posix: str) -> bool telling whether 'rel_posix'
-    is ignored by .gitignore at 'repo'. Returns None if no .gitignore exists.
-    """
     gi = repo / ".gitignore"
     if not gi.exists():
         return None
 
     try:
-        from pathspec import PathSpec  # optional dependency
+        from pathspec import PathSpec
         spec = PathSpec.from_lines("gitwildmatch", gi.read_text(encoding="utf-8").splitlines())
         return spec.match_file
     except Exception:
@@ -203,7 +175,7 @@ def _make_gitignore_matcher(repo: Path):
         return _match
 
 
-def iter_repo_files_for_license_check(repo: Path, include_exts: Set[str]):
+def iter_repo_files_for_license_check(repo: Path, include_exts: set[str]):
     repo = Path(repo).resolve()
     is_ignored = _make_gitignore_matcher(repo)
     for p in sorted(repo.rglob("*")):
@@ -219,84 +191,38 @@ def iter_repo_files_for_license_check(repo: Path, include_exts: Set[str]):
         yield p
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# License / NOTICE validation (mostly unchanged; accepts cfg + resource_reader)
-# ──────────────────────────────────────────────────────────────────────────────
-
-# File kinds considered for license headers
 _OSS_HEADER_EXTS = {
-    ".c",
-    ".h",
-    ".cpp",
-    ".hpp",
-    ".cc",
-    ".cxx",
-    ".java",
-    ".js",
-    ".ts",
-    ".tsx",
-    ".mjs",
-    ".cjs",
-    ".go",
-    ".rs",
-    ".swift",
-    ".kt",
-    ".cs",
-    ".cmake",
-    ".mk",
-    ".make",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts",
+    ".tsx", ".mjs", ".cjs", ".go", ".rs", ".swift", ".kt", ".cs",
+    ".cmake", ".mk", ".make",
 }
 
 _OSS_NEWLINE_EXTS = {
-    ".c",
-    ".h",
-    ".cpp",
-    ".hpp",
-    ".cc",
-    ".cxx",
-    ".py",
-    ".sh",
-    ".bash",
-    ".zsh",
-    ".md",
-    ".txt",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".py", ".sh", ".bash",
+    ".zsh", ".md", ".txt",
 }
 
 _OSS_SKIP_DIRS = {
-    ".git",
-    ".svn",
-    ".hg",
-    ".tox",
-    ".venv",
-    "venv",
-    "node_modules",
-    "build",
-    "dist",
-    "__pycache__",
-    ".idea",
-    ".vscode",
+    ".git", ".svn", ".hg", ".tox", ".venv", "venv", "node_modules",
+    "build", "dist", "__pycache__", ".idea", ".vscode",
 }
 
 def validate_licenses(
-    repo: Path,
-    *,
-    cfg: Optional[dict] = None,
-    resource_reader: Optional[callable] = None,
-    include_exts: Optional[Set[str]] = None,
-    apply_fixes: bool = False,
-    no_prompt: bool = False,
-    decisions_path: Optional[Path] = None,
-    notice_file: str = "NOTICE",
-) -> Dict[str, Any]:
-    """
-    Enforce SPDX headers, maintain NOTICE, ensure canonical license texts.
-    Accepts an already‑loaded/derived cfg and a resource reader (to fetch
-    canonical license texts from the templates tree).
-    """
+        repo: Path,
+        *,
+        cfg: dict | None = None,
+        resource_reader: callable | None = None,
+        include_exts: set[str] | None = None,
+        apply_fixes: bool = False,
+        no_prompt: bool = False,
+) -> dict[str, Any]:
     repo = Path(repo).resolve()
-    res: Dict[str, Any] = {"repo": str(repo), "issues": [], "summary": {}}
 
-    # Load defaults if cfg/resource_reader weren’t provided
+    # ── Enforced Standards ──
+    notice_file = "NOTICE"
+
+    res: dict[str, Any] = {"repo": str(repo), "issues": [], "summary": {}}
+
     if cfg is None or resource_reader is None:
         reader = ConfigReader(repo)
         reader.load()
@@ -305,11 +231,10 @@ def validate_licenses(
         if resource_reader is None:
             resource_reader = reader.read_resource_text
 
-    # Config pieces
-    licenses: Dict[str, Dict[str, Any]] = (cfg.get("licenses") or {})
-    default_profile: Optional[str] = cfg.get("license_profile")
-    overrides_map: Dict[str, str] = (cfg.get("license_overrides") or {})
-    extras_map: Dict[str, Any] = (cfg.get("license_extras") or {})
+    licenses: dict[str, dict[str, Any]] = (cfg.get("licenses") or {})
+    default_profile: str | None = cfg.get("license_profile")
+    overrides_map: dict[str, str] = (cfg.get("license_overrides") or {})
+    extras_map: dict[str, Any] = (cfg.get("license_extras") or {})
 
     if not licenses:
         res["issues"].append({"type": "config_error", "message": "No 'licenses' map found in defaults/repo config."})
@@ -320,7 +245,6 @@ def validate_licenses(
         res["issues"].append({"type": "config_error", "message": "Missing or invalid 'license_profile'."})
         return res
 
-    # NOTICE context
     year = (str(cfg.get("date") or "")[:4]) or "2025"
     ctx = {
         "project_name": cfg.get("project_name") or cfg.get("project_title") or repo.name,
@@ -333,23 +257,16 @@ def validate_licenses(
 
     jenv = Environment(autoescape=False, keep_trailing_newline=True, trim_blocks=True, lstrip_blocks=True)
 
-    # Decisions cache
-    decisions: Dict[str, str] = {}
-    if decisions_path and decisions_path.exists():
-        try:
-            decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
-        except Exception:
-            decisions = {}
+    decisions: dict[str, str] = {}
 
     files_checked = headers_added = headers_updated = unchanged = 0
-    profiles_used: Set[str] = set()
-    profiles_order: List[str] = []
+    profiles_used: set[str] = set()
+    profiles_order: list[str] = []
 
     cfg_exts = cfg.get("license_header_extensions")
     if include_exts is None:
         include_exts = {(e if str(e).startswith(".") else "." + str(e)).lower() for e in cfg_exts} if cfg_exts else set(_OSS_HEADER_EXTS)
 
-    # Scan repo files
     for p in iter_repo_files_for_license_check(repo, include_exts):
         if not p.is_file():
             continue
@@ -358,13 +275,11 @@ def validate_licenses(
         if p.name != "CMakeLists.txt" and p.suffix.lower() not in include_exts:
             continue
 
-        # Fix final newline for selected file types
         if p.suffix.lower() in _OSS_NEWLINE_EXTS:
             _oss_check_final_newline(p, res["issues"], apply_fixes=True)
 
         rel = p.relative_to(repo).as_posix()
 
-        # Effective profile: base + path overrides + extras
         base_prof_name = default_profile
         base_prof = licenses.get(base_prof_name) or {}
 
@@ -375,7 +290,6 @@ def validate_licenses(
                 break
         ovr_prof = licenses.get(override_prof_name) or {}
 
-        # Merge (override keys replace base; explicit empty erases)
         effective_prof = dict(base_prof)
         for k, v in (ovr_prof or {}).items():
             if v is None or (isinstance(v, str) and not v.strip()):
@@ -385,7 +299,6 @@ def validate_licenses(
         if override_prof_name and "spdx" not in ovr_prof:
             effective_prof.pop("spdx", None)
 
-        # Render SPDX (base/override)
         raw_spdx_eff = (effective_prof.get("spdx") or "").rstrip()
         try:
             spdx_text_eff = jenv.from_string(raw_spdx_eff).render(**ctx).rstrip()
@@ -394,8 +307,7 @@ def validate_licenses(
             unchanged += 1
             continue
 
-        # Extras that append SPDX/NOTICE
-        extra_names: List[str] = []
+        extra_names: list[str] = []
         for pat, val in (extras_map or {}).items():
             if fnmatch.fnmatch(rel, pat):
                 if isinstance(val, (list, tuple)):
@@ -403,7 +315,7 @@ def validate_licenses(
                 else:
                     extra_names.append(str(val))
 
-        spdx_extra_chunks: List[str] = []
+        spdx_extra_chunks: list[str] = []
         for ep_name in extra_names:
             ep_cfg = licenses.get(ep_name) or {}
             ep_raw = (ep_cfg.get("spdx") or "").rstrip()
@@ -420,7 +332,6 @@ def validate_licenses(
         if spdx_extra_chunks:
             spdx_combined = (spdx_text_eff + "\n\n" if spdx_text_eff else "") + ("\n\n".join(spdx_extra_chunks))
 
-        # Track NOTICE profiles used (base/override/extras)
         def _has_notice(prof_dict): return bool((prof_dict.get("notice") or "").strip())
         if _has_notice(ovr_prof):
             if override_prof_name and override_prof_name not in profiles_used:
@@ -436,7 +347,6 @@ def validate_licenses(
                 profiles_used.add(ep_name)
                 profiles_order.append(ep_name)
 
-        # Header enforcement
         style = _comment_style_for(p)
         text = p.read_text(encoding="utf-8", errors="ignore")
         lines = text.splitlines()
@@ -473,7 +383,6 @@ def validate_licenses(
             continue
 
         if apply_fixes:
-            # Silent unless interactive requested (we default to no_prompt coherently)
             if no_prompt or not os.sys.stdin.isatty():
                 new_lines = lines[:start] + expected_lines + lines[end:]
                 p.write_text(_ensure_trailing_newline("\n".join(new_lines)), encoding="utf-8")
@@ -502,18 +411,10 @@ def validate_licenses(
         else:
             res["issues"].append({"type": "file_spdx_header_mismatch", "file": rel})
 
-    # Persist decisions if requested
-    if decisions_path:
-        try:
-            decisions_path.write_text(json.dumps(decisions, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        except Exception:
-            pass
+    unique_notices: list[str] = []
+    seen_norms: set[str] = set()
 
-    # NOTICE: order default profile first (if used), then first‑seen
-    unique_notices: List[str] = []
-    seen_norms: Set[str] = set()
-
-    ordered_profiles: List[str] = []
+    ordered_profiles: list[str] = []
     if default_profile and default_profile in profiles_order:
         ordered_profiles.append(default_profile)
     ordered_profiles.extend([p for p in profiles_order if p != default_profile])
@@ -538,7 +439,6 @@ def validate_licenses(
             else:
                 res["issues"].append({"type": "notice_out_of_date", "file": notice_file})
 
-    # Ensure license texts match canonical resources
     for prof in sorted(profiles_used):
         prof_cfg = licenses.get(prof, {}) or {}
         primary_path = (prof_cfg.get("license") or "").strip()
@@ -558,8 +458,7 @@ def validate_licenses(
             else:
                 _check_license_file(repo, res["issues"], pth, can, resource_reader, apply_fixes=False)
 
-    # Guard for profiles that name a license path but provide no canonical
-    missing_license_texts: List[str] = []
+    missing_license_texts: list[str] = []
     for prof in sorted(profiles_used):
         prof_cfg = licenses.get(prof, {}) or {}
         lic_path = prof_cfg.get("license")
@@ -578,11 +477,8 @@ def validate_licenses(
     }
     return res
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Validator helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
-def _render_spdx_as_comment(spdx_text: str, style: Dict[str, str]) -> List[str]:
+def _render_spdx_as_comment(spdx_text: str, style: dict[str, str]) -> list[str]:
     raw = spdx_text.rstrip("\n").splitlines()
     if not raw:
         return []
@@ -592,8 +488,8 @@ def _render_spdx_as_comment(spdx_text: str, style: Dict[str, str]) -> List[str]:
     out = [style["open"], *raw, style["close"], ""]
     return out
 
-def _strip_comment_prefix(lines: List[str], style: Dict[str, str]) -> List[str]:
-    out: List[str] = []
+def _strip_comment_prefix(lines: list[str], style: dict[str, str]) -> list[str]:
+    out: list[str] = []
     if not lines:
         return out
     if style["mode"] == "line":
@@ -613,14 +509,13 @@ def _strip_comment_prefix(lines: List[str], style: Dict[str, str]) -> List[str]:
         out.pop()
     return out
 
-def _norm_block(lines: List[str]) -> str:
+def _norm_block(lines: list[str]) -> str:
     import re as _re
     cleaned = [_re.sub(r"\s+", " ", ln).strip() for ln in lines]
     cleaned = [ln for ln in cleaned if ln]
     return "\n".join(cleaned)
 
-def _extract_header_region(lines: List[str], style: Dict[str, str]) -> Tuple[int, int, List[str], bool]:
-    """Find leading SPDX header block region."""
+def _extract_header_region(lines: list[str], style: dict[str, str]) -> tuple[int, int, list[str], bool]:
     def _is_blank(s: str) -> bool:
         return not s.strip()
 
@@ -629,7 +524,6 @@ def _extract_header_region(lines: List[str], style: Dict[str, str]) -> Tuple[int
 
     if style["mode"] == "line":
         pref = style["prefix"]
-        # Collect top comment/blank run
         start = i
         j = start
         while j < n and (_is_blank(lines[j]) or lines[j].lstrip().startswith(pref)):
@@ -668,7 +562,7 @@ def _extract_header_region(lines: List[str], style: Dict[str, str]) -> Tuple[int
             return start, end, lines[start:end], True
         return i, i, [], False
 
-def _render_notice_from_profile(prof: Dict[str, Any], ctx: Dict[str, Any], resource_reader) -> Optional[str]:
+def _render_notice_from_profile(prof: dict[str, Any], ctx: dict[str, Any], resource_reader) -> str | None:
     license_file = (prof.get("license") or "LICENSE").strip()
     extra_ctx = dict(ctx)
     extra_ctx["license_file"] = license_file
@@ -677,22 +571,22 @@ def _render_notice_from_profile(prof: Dict[str, Any], ctx: Dict[str, Any], resou
         src = resource_reader(tpl_path)
         if src is None:
             return None
-        return Environment(autoescape=False, keep_trailing_newline=True, trim_blocks=True, lstrip_blocks=True)\
-               .from_string(src).render(**extra_ctx).rstrip() + "\n"
+        return Environment(autoescape=False, keep_trailing_newline=True, trim_blocks=True, lstrip_blocks=True) \
+            .from_string(src).render(**extra_ctx).rstrip() + "\n"
     txt = (prof.get("notice") or "").strip()
     if not txt:
         return None
-    return Environment(autoescape=False, keep_trailing_newline=True, trim_blocks=True, lstrip_blocks=True)\
-           .from_string(txt).render(**extra_ctx).rstrip() + "\n"
+    return Environment(autoescape=False, keep_trailing_newline=True, trim_blocks=True, lstrip_blocks=True) \
+        .from_string(txt).render(**extra_ctx).rstrip() + "\n"
 
 def _check_license_file(
-    repo: Path,
-    issues: List[Dict[str, Any]],
-    path_in_repo: str,
-    canonical_rel: str,
-    resource_reader,
-    *,
-    apply_fixes: bool,
+        repo: Path,
+        issues: list[dict[str, Any]],
+        path_in_repo: str,
+        canonical_rel: str,
+        resource_reader,
+        *,
+        apply_fixes: bool,
 ) -> None:
     canon = resource_reader(canonical_rel)
     if canon is None:
@@ -715,16 +609,12 @@ def _oss_norm_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     return "\n".join(ln.rstrip() for ln in s.splitlines()).strip() + "\n"
 
-def _oss_check_final_newline(path: Path, issues: List[Dict[str, Any]], apply_fixes: bool) -> None:
+def _oss_check_final_newline(path: Path, issues: list[dict[str, Any]], apply_fixes: bool) -> None:
     text = path.read_bytes()
     if not text.endswith(b"\n"):
         issues.append({"type": "file_missing_final_newline", "file": path.as_posix()})
         if apply_fixes:
             path.write_bytes(text + b"\n")
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Apply helpers
-# ──────────────────────────────────────────────────────────────────────────────
 
 def _apply_items(repo: Path, items, state: dict) -> None:
     for it in items:

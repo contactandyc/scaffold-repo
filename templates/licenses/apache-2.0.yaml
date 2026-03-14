@@ -1,0 +1,8 @@
+spdx: |
+  SPDX-FileCopyrightText: {{ year }} {{ author }}
+  SPDX-License-Identifier: Apache-2.0
+license: LICENSE
+license_canonical: resources/licenses/Apache-2.0.txt
+notice: |
+  {{ project_title }} © {{ year }} {{ author }}
+  Licensed under Apache-2.0 (see LICENSE)

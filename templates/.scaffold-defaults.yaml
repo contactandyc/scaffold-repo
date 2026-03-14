@@ -1,0 +1,31 @@
+# ── Git Branching Standards ──
+branch_prefixes:
+  feat: A new feature
+  fix: A bug fix
+  docs: Documentation only changes
+  refactor: A code change that neither fixes a bug nor adds a feature
+  test: Adding missing tests or correcting existing tests
+  chore: Changes to the build process or auxiliary tools
+
+# ── OSS Engine Routing ──
+packages:
+  base: true
+  flavor: true
+  changie: false
+  site: false
+  docs: false
+
+template_packages:
+  base:
+    - base/**
+  flavor:
+    - flavors/{{ repo_flavor }}/**
+  changie:
+    - mixins/changie/**
+  site:
+    - mixins/jekyll-site/**
+  docs:
+    - mixins/markdown-docs/**
+  resources:
+    - resources/**
+    - scaffold-repo.yaml

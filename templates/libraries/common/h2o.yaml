@@ -1,0 +1,16 @@
+kind: git
+url: https://github.com/h2o/h2o.git
+branch: v2.2.6
+dir: h2o
+depends_on: [ system/OpenSSL, 3rd-party/libuv, system/ZLIB ]
+build_steps:
+  - git clone --depth 1 --branch v2.2.6 --single-branch "https://github.com/h2o/h2o.git" "h2o"
+  - mkdir -p build/h2o && cd build/h2o
+  - cmake ../../h2o -DCMAKE_INSTALL_PREFIX=/usr/local -DWITH_MRUBY=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  - make -j"$(nproc)" && sudo make install
+  - cd ../.. && rm -rf h2o
+find_package: null
+pkg_config: libh2o
+link: h2o
+license_spdx: MIT
+attribution: "H2O by Kazuho Oku — MIT"

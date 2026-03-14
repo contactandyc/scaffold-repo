@@ -1,0 +1,50 @@
+project_title: A Map Reduce Library
+version: 0.0.1
+
+profile: andy-curtis/andy-curtis
+template: cmake-c-git
+
+depends_on:
+  - andy-curtis/the-io-library
+  - andy-curtis/a-memory-library
+  - andy-curtis/the-macro-library
+apps:
+  context:
+    dest: examples
+    depends_on:
+      - andy-curtis/a-map-reduce-library
+      - andy-curtis/a-json-library
+      - andy-curtis/a-json-sax-library
+      - andy-curtis/a-memory-library
+  01_word_count:
+    binaries:
+      word_count:
+        - src/main.c
+  02_streaming_recommender:
+    binaries:
+      streaming_recommender:
+        - src/*.c
+  03_pipeline_recommender:
+    binaries:
+      pipeline_recommender:
+        - src/main.c
+        - src/pipeline_amazon.c
+        - src/pipeline_enrich.c
+        - src/pipeline_co_freq.c
+      pipeline_sax_recommender:
+        - src/main.c
+        - src/pipeline_amazon_sax.c
+        - src/pipeline_enrich.c
+        - src/pipeline_co_freq.c
+  04_inverted_recommender:
+    binaries:
+      inverted_recommender:
+        - src/*.c
+  05_complements_recommender:
+    binaries:
+      complements_recommender:
+        - src/*.c
+  06_substitutes_recommender:
+    binaries:
+      substitutes_recommender:
+        - src/*.c

@@ -1,0 +1,5 @@
+spdx: |
+  SPDX-FileCopyrightText: {{ year }} {{ author }}
+  SPDX-License-Identifier: BSD-3-Clause
+license: LICENSE
+license_canonical: resources/licenses/BSD-3-Clause.txt

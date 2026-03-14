@@ -1,0 +1,8 @@
+kind: system
+find_package: "CURL REQUIRED"
+link: "CURL::libcurl"
+pkg: libcurl4-openssl-dev
+depends_on:
+  - system/OpenSSL
+  - system/ZLIB
+  - system/Threads

@@ -1,0 +1,16 @@
+spdx: |
+  SPDX-FileCopyrightText: 2025-{{ year }} {{ contributors.andy_curtis.contact }}
+  SPDX-License-Identifier: Apache-2.0
+
+  SPDX-FileComment: This project is an independent library for interacting with the Google and Google Cloud API.
+  It is not affiliated with, endorsed by, or sponsored by Google.
+  "Google" and related marks are trademarks of Alphabet.
+license: LICENSE
+license_canonical: resources/licenses/Apache-2.0.txt
+notice: |
+  {{ project_title }} © 2025-{{ year }} {{ contributors.andy_curtis.contact }}
+  Licensed under Apache-2.0 (see LICENSE)
+
+  NON-AFFILIATION: This software is an independent library for interacting with the Google and Google Cloud API.
+  It is not affiliated with, endorsed by, or sponsored by Google. "Google" and related marks
+  are trademarks of Alphabet

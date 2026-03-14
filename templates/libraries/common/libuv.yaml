@@ -1,0 +1,12 @@
+kind: git
+url: https://github.com/libuv/libuv.git
+branch: v1.48.0
+dir: libuv
+build_steps:
+  - git clone --depth 1 --branch v1.48.0 --single-branch "https://github.com/libuv/libuv.git" "libuv"
+  - mkdir -p build/libuv && cd build/libuv
+  - cmake ../../libuv -DCMAKE_INSTALL_PREFIX=/usr/local -DBUILD_TESTING=OFF
+  - make -j"$(nproc)" && sudo make install
+  - cd ../.. && rm -rf libuv
+find_package: "libuv CONFIG REQUIRED"
+link: "libuv::uv"

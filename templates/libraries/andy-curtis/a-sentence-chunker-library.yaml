@@ -1,0 +1,16 @@
+project_title: A Sentence Chunker Library
+version: 0.0.1
+
+profile: andy-curtis/andy-curtis-knode
+template: cmake-c-git
+
+license_profile: andy-curtis/knode-shared
+
+tests:
+  targets:
+    - chunker
+depends_on:
+  - andy-curtis/a-memory-library
+  - andy-curtis/the-macro-library
+  - andy-curtis/the-io-library
+  - andy-curtis/a-json-library

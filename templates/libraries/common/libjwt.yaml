@@ -1,0 +1,17 @@
+kind: git
+url: https://github.com/benmcollins/libjwt.git
+shallow: true
+dir: libjwt
+build_steps:
+  - git clone --depth 1 "https://github.com/benmcollins/libjwt.git" "libjwt"
+  - cd libjwt
+  - mkdir -p build && cd build
+  - cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+  - make -j"$(nproc)"
+  - sudo make install
+  - cd / && rm -rf libjwt
+find_package: "libjwt REQUIRED"
+link: "jwt::jwt"
+depends_on:
+  - system/libjansson-dev
+

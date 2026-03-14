@@ -1,0 +1,11 @@
+kind: git
+url: https://github.com/contactandyc/restinio.git
+dir: restinio/expected-lite
+build_steps:
+  - git clone --depth 1 "https://github.com/contactandyc/restinio.git" "restinio"
+  - mkdir -p build/expected-lite && cd build/expected-lite
+  - cmake ../../restinio/expected-lite
+  - make -j"$(nproc)" && sudo make install
+  - cd ../.. && rm -rf restinio
+find_package: "expected-lite CONFIG REQUIRED"
+link: "nonstd::expected-lite"

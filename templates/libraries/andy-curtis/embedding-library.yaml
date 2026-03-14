@@ -1,0 +1,21 @@
+project_title: Embedding Library
+version: 0.0.1
+
+profile: andy-curtis/andy-curtis-knode
+template: cmake-c-git
+
+license_profile: andy-curtis/knode-shared
+
+depends_on:
+  - system/libm
+apps:
+  context:
+    dest: examples
+    depends_on:
+      - andy-curtis/a-json-library
+      - andy-curtis/the-io-library
+      - andy-curtis/embedding-library
+      - andy-curtis/a-memory-library
+  demo:
+    binaries:
+      - parse_sentences

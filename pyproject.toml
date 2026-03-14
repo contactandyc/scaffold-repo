@@ -5,24 +5,28 @@ build-backend = "hatchling.build"
 [project]
 name = "scaffold-repo"
 version = "0.1.0"
-description = "Scaffold C/CMake repos from Jinja2 templates; ignores code trees by default."
+description = "Scaffold C/CMake repos from Jinja2 templates and enforce OSS hygiene."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
-authors = [{ name = "Your Name", email = "you@example.com" }]
+authors = [{ name = "Andy Curtis", email = "contactandyc@gmail.com" }]
 dependencies = [
     "jinja2>=3.1",
-    "pyyaml>=6.0"
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
-xx = "scaffold_repo.xx:main"
 scaffold-repo = "scaffold_repo.scaffold_repo:main"
 scaffold-build-libs = "scaffold_repo.build_libs:main"
 
-
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "pre-commit>=3.0", "ruff>=0.4", "black>=24.0", "pathspec>=0.11"]
+dev = [
+    "pytest>=7.0",
+    "pre-commit>=3.0",
+    "ruff>=0.4",
+    "black>=24.0",
+    "pathspec>=0.11",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scaffold_repo"]

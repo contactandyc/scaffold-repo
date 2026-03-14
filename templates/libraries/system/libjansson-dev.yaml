@@ -1,0 +1,4 @@
+kind: system
+find_package: null
+link: jansson
+pkg: libjansson-dev
