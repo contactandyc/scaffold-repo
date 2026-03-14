@@ -1,45 +1,47 @@
-# `scaffold-repo`: The Declarative Fleet Manager
-
-`scaffold-repo` is a highly scalable, registry-driven scaffolding engine and meta-package manager for C/C++ (and polyglot) repositories.
-
-Unlike traditional tools that ask you 20 questions to generate a single repository and then forget about it, `scaffold-repo` manages your **entire fleet** of repositories from a centralized YAML registry. You define what a library *is*, who its *authors* are, and what it *depends on*. The engine topological-sorts your dependency graph, computes the exact `CMake` linkings, enforces Open Source compliance, and stamps out the code across dozens of repositories instantly.
-
-If you need to update the minimum CMake version, change a license, or add a new CI tool across 50 repositories, you change one line in the registry, run `scaffold-repo . --project all -y`, and your entire ecosystem is modernized in seconds.
+Here is a rewritten version of the documentation. I have removed the marketing-heavy language and focused entirely on providing a clear, factual, and objective description of the tool's architecture, capabilities, and workflows.
 
 ---
 
-## ✨ Highlights & Capabilities
+# `scaffold-repo`
 
-* **Graph-Aware Meta-Generation:** Reads `depends_on:` links, topological-sorts your dependencies, and writes the perfect `CMakeLists.txt`, `build.sh`, and `Dockerfile` with the correct `find_package` and `target_link_libraries` configurations.
-* **Export-Ready CMake Variants:** Automatically generates four build variants for every C/C++ library (`debug`, `memory`, `static`, `shared`) alongside an umbrella target, making them instantly consumable.
-* **Built-in OSS Compliance:** Automatically injects and updates SPDX license headers (in C, C++, Python, JS, HTML, etc.), aggregates `NOTICE` files based on actual code lineage, and syncs canonical `LICENSE` texts.
-* **Polyglot & Multi-App Support:** Scaffolds massive C/C++ libraries while simultaneously routing specific templates for sub-applications (e.g., mixing C libraries with C++ binaries or Jekyll sites) using the `app-resources/` engine.
-* **External Dependency Builder:** Acts as a lightweight package manager to safely clone, configure, and install external Git libraries (like `libuv` or `fmt`) in the exact order your project needs them.
-* **Idempotent & Safe:** Compares normalized ASTs to prevent ping-ponging diffs, respects `.gitignore`, and allows you to freeze custom files from future updates.
+`scaffold-repo` is a registry-driven scaffolding engine and meta-package manager designed for C/C++ and polyglot repositories.
+
+Rather than generating a repository once and leaving it unmanaged, `scaffold-repo` allows you to maintain multiple repositories from a centralized YAML registry. By defining library metadata, authorship, and dependency mappings in one place, the engine can perform a topological sort of your dependency graph, compute CMake linking requirements, apply open-source compliance headers, and synchronize these configurations across your designated repositories. This centralized approach allows you to apply broad structural changes—such as updating a minimum CMake version or standardizing a CI pipeline—across an entire project ecosystem via a single registry update and CLI execution.
 
 ---
 
-## 📂 The Registry Architecture
+## Core Capabilities
 
-Your centralized registry lives in the `templates/` directory. It strictly separates **data** (YAML) from **templates** (Jinja2/verbatim files):
+* **Graph-Aware Generation:** Parses `depends_on:` declarations to topologically sort dependencies. It automatically generates `CMakeLists.txt`, `build.sh`, and `Dockerfile` assets with the corresponding `find_package` and `target_link_libraries` configurations.
+* **CMake Build Variants:** Generates four standard build configurations for C/C++ libraries (`debug`, `memory`, `static`, `shared`) alongside an umbrella target for downstream consumption.
+* **OSS Compliance Management:** Injects and updates SPDX license headers across supported file types (including C, C++, Python, JS, HTML), aggregates `NOTICE` files based on repository lineage, and synchronizes canonical `LICENSE` texts.
+* **Polyglot & Multi-App Routing:** Scaffolds base C/C++ libraries while routing distinct templates to sub-applications (e.g., combining C libraries with C++ binaries or Jekyll sites) using the `app-resources/` directory.
+* **External Dependency Handling:** Clones, configures, and installs external Git dependencies (such as `libuv` or `fmt`) in the order required by your dependency graph.
+* **State Management:** Compares normalized ASTs to minimize unnecessary diffs, respects `.gitignore` rules, and provides configuration options to freeze specific files from future template overwrites.
+
+---
+
+## Registry Architecture
+
+The central registry is located within the `templates/` directory. It strictly separates YAML data from Jinja2/verbatim templates:
 
 ```text
 templates/
-├── .scaffold-defaults.yaml     # Internal engine router (which packages to enable)
-├── libraries/                  # The registry of every library in your fleet
+├── .scaffold-defaults.yaml     # Internal engine router (specifies active packages)
+├── libraries/                  # The registry of configured libraries
 │   └── my-namespace/
 │       └── my-library.yaml
-├── profiles/                   # Global variables (authors, orgs, base licenses)
-├── library-templates/          # Architectural Archetypes (e.g., cmake-c-git)
+├── profiles/                   # Global variables (authors, organizations, base licenses)
+├── library-templates/          # Architectural archetypes (e.g., cmake-c-git)
 ├── licenses/                   # SPDX and NOTICE configurations
 ├── flavors/                    # Root-level Jinja templates (CMakeLists.txt, build.sh)
-└── app-resources/              # Sub-application templates (shielded from the root)
+└── app-resources/              # Sub-application templates (isolated from the root)
 
 ```
 
-### A Clean, Declarative DSL
+### Declarative Configuration
 
-Because of the deep-merging engine, defining a new library, its tests, and its apps takes only a few lines of code.
+A library and its sub-components are defined using a structured YAML format.
 
 **`templates/libraries/my-namespace/a-bitset-library.yaml`**
 
@@ -50,20 +52,20 @@ version: 0.0.1
 # 1. Inherit global authors, tools, and the default OSS license
 profile: my-namespace/my-profile
 
-# 2. Inherit the C/CMake architecture (CMakeLists, Dockerfile, tests)
+# 2. Assign the C/CMake architecture template
 template: cmake-c-git
 
-# 3. The engine will automatically link these via CMake!
+# 3. Define internal dependencies for CMake linking
 depends_on:
   - my-namespace/a-memory-library
 
-# 4. Define tests (auto-detects from src/ if omitted)
+# 4. Define tests (auto-detected from src/ if omitted)
 tests:
   targets:
     - test_bitset
     - test_bitset_expandable
 
-# 5. Define sub-applications/examples
+# 5. Define sub-applications or examples
 apps:
   context:
     dest: examples
@@ -75,119 +77,51 @@ apps:
 
 ---
 
-## 🏗️ What Developers Get (The Output)
+## Generated Output
 
-When `scaffold-repo` runs against a C/C++ project, it generates an enterprise-grade repository environment.
+When executed against a C/C++ project, `scaffold-repo` produces a standardized repository structure.
 
-### Library Flavors & CMake
+### CMake and Library Variants
 
-For compiled libraries, the engine generates four variants — `debug`, `memory`, `static`, `shared` — **all built and installable simultaneously**.
-An umbrella target **`<name>::<name>`** is created. Consumers can easily select which variant they want to link against:
+For compiled libraries, the engine outputs `debug`, `memory`, `static`, and `shared` variants, which can be built and installed concurrently. It also establishes an umbrella target, **`<name>::<name>`**, for consumer linking:
 
 ```cmake
-set(A_BUILD_VARIANT "debug") # or memory|static|shared
+set(A_BUILD_VARIANT "debug") # options: memory | static | shared
 find_package(a_bitset_library CONFIG REQUIRED)
 target_link_libraries(myexe PRIVATE a_bitset_library::a_bitset_library)
 
 ```
 
-### The Standard Build Script (`build.sh`)
+### Standardized Build Script
 
-Every repo gets a generator-aware build script (prefers Ninja, falls back to Make) with standardized commands:
-
-```bash
-./build.sh build      # default: configure and build
-./build.sh install    # build + install (with sudo if needed)
-./build.sh coverage   # builds tests, runs them, and emits an HTML coverage report
-./build.sh clean      # wipes build directories
-
-```
-
-## 🚀 CLI Usage
-
-*(Note: If you run the CLI from a directory containing a `templates/` folder, the engine will auto-detect it. Otherwise, you can pass `--templates-dir` or use `-C` to change the working directory).*
-
-### 1. The Full Pipeline (Build, Test, and Ship)
-
-Because `scaffold-repo` topological-sorts your registry, you can orchestrate a full end-to-end pipeline across dozens of repositories with a single command. 
+Each repository is populated with a generator-aware `build.sh` script (defaulting to Ninja, falling back to Make) that supports the following standard commands:
 
 ```bash
-scaffold-repo my-namespace --install-deps --install -y --commit "Update CMake config" --tag --push
+./build.sh build      # Configures and builds the project
+./build.sh install    # Builds and installs the project (requests sudo if required)
+./build.sh coverage   # Builds tests, executes them, and generates an HTML coverage report
+./build.sh clean      # Removes build directories
 
 ```
 
-When you run this, the engine executes four distinct phases:
+---
 
-1. **Phase 1 (Scaffold):** Auto-clones missing repositories and applies templates to all targets inside `my-namespace`.
-2. **Phase 2 (Dependencies):** Compiles and installs any external third-party C/C++ packages they need (e.g., `libuv`).
-3. **Phase 3 (First-Party Build):** Steps through your scaffolded code in dependency-order and executes `./build.sh install` on each one.
-4. **Phase 4 (Git Sync):** Commits the files, generates an annotated Git tag based on the `version:` field inside your YAML registry, and pushes everything to GitHub!
+## CLI Workflow and Usage
 
-### 2. Granular Commands
+`scaffold-repo` auto-detects the registry if run from a directory containing a `templates/` folder. Alternatively, you can specify the path using `--templates-dir` or `-C`.
 
-If you just want to update files or build a specific component:
+### The Branching Pipeline
 
-```bash
-# Scaffold one specific project (auto-cloning if missing)
-scaffold-repo my-namespace/a-bitset-library -y --show-diffs
+The engine utilizes a 4-phase pipeline (Scaffold, Dependencies, Build, Git Sync) and enforces a **`main` -> `dev-*` -> `feat/***` branching topology. Generated code is isolated into a `../repos` directory to keep the primary workspace clear.
 
-# Only build a specific third-party dependency 
-scaffold-repo common/libuv custom/fmt --build-deps
+**Step 1: Start a Feature**
 
-# Just cut a release without making code changes (creates tag from YAML version and pushes)
-scaffold-repo my-namespace/a-bitset-library --tag --push
-
-```
-
-### Full CLI Reference
-
-```text
-Usage: scaffold-repo [PROJECTS...] [OPTIONS]
-
-Arguments:
-  PROJECTS                  One or more projects/namespaces to scaffold or build.
-                            (e.g., 'my-namespace/a-bitset-library', 'common', 'all')
-
-Workspace Options:
-  -C, --cwd PATH            Run as if started in <PATH> (default: current dir)
-  --templates-dir PATH      Override templates directory (auto-detects ./templates)
-
-Scaffolding Options:
-  -y, --assume-yes          Apply template updates and fix licenses without prompting
-  --show-diffs              Print inline diffs before applying file updates
-  --no-prompt               Do not prompt during SPDX license header fixups
-
-Dependency Lifecycle:
-  --clone-deps              Fetch external dependencies without compiling
-  --build-deps              Fetch and compile external dependencies
-  --install-deps            Fetch, compile, and install external dependencies
-
-Target Lifecycle (Your Code):
-  --build                   Run './build.sh build' on the scaffolded projects
-  --install                 Run './build.sh install' on the scaffolded projects
-
-Git Orchestration (Your Code):
-  --commit MSG              Commit all changes in target projects with this message
-  --tag                     Tag targets using their YAML 'version' (e.g., 'v0.0.1')
-  --push                    Push commits (and tags) to the remote origin
-
-```
-
-## 🚀 CLI Usage
-
-*(Note: If you run the CLI from a directory containing a `templates/` folder, the engine will auto-detect it. Otherwise, you can pass `--templates-dir` or use `-C` to change the working directory).*
-
-### The 4-Phase Monorepo Pipeline
-
-`scaffold-repo` operates on a 4-phase pipeline (Scaffold, Dependencies, Build, Git Sync). It enforces a strict **`main` -> `dev-*` -> `feat/*`** branching topology, and isolates all generated code into a `../repos` directory so your tooling workspace stays perfectly clean.
-
-**Step 1: Start a New Feature**
 ```bash
 scaffold-repo my-namespace --start-feature "dynamic-resize" -y
 
 ```
 
-*(Auto-clones missing repos, auto-syncs existing ones. Creates the integration branch `dev-v0.0.2` if it doesn't exist, checks out `feat/dynamic-resize` off of it, and scaffolds the templates).*
+> Clones missing repositories and synchronizes existing ones. It creates or checks out the integration branch (e.g., `dev-v0.0.2`), and branches `feat/dynamic-resize` for template scaffolding.
 
 **Step 2: Compile Dependencies & First-Party Code**
 
@@ -196,30 +130,28 @@ scaffold-repo my-namespace --install-deps --install
 
 ```
 
-*(Compiles/installs external dependencies, then topologically runs `./build.sh install` on your C++ libraries).*
+> Compiles and installs external dependencies, then performs a topological execution of `./build.sh install` on the local C++ libraries.
 
-**Step 3: Commit and Push to the Feature Branch**
+**Step 3: Commit and Push**
 
 ```bash
 scaffold-repo my-namespace --commit "WIP: integrating allocator" --push
 
 ```
 
-*(Safely commits to your feature branch and pushes to origin, aggressively blocking accidental commits to `main` or the `dev-*` integration branch).*
+> Commits changes to the feature branch and pushes to origin. The engine prevents direct commits to `main` or the `dev-*` integration branches during this step.
 
-**Step 4: The Release**
-*(After you merge your PRs into the `dev-*` integration branch on GitHub)*:
+**Step 4: Publish Release**
+*(Executed after merging PRs into the `dev-*` integration branch)*
 
 ```bash
 scaffold-repo my-namespace --publish-release --push
 
 ```
 
-*(Checks out `main`, prompts you for the `dev` branch to release, merges it into `main`, auto-tags it, bumps the version in your central YAML registry, and pushes the new release).*
+> Checks out `main`, merges the specified `dev` branch, auto-tags the release based on the YAML version, bumps the version in the central registry, and pushes the updates.
 
----
-
-### Full CLI Reference
+### Complete CLI Reference
 
 ```text
 Usage: scaffold-repo [PROJECTS...] [OPTIONS]
@@ -248,36 +180,37 @@ Target Lifecycle (Your Code):
   --build                   Run './build.sh build' on the scaffolded projects
   --install                 Run './build.sh install' on the scaffolded projects
 
-Git Orchestration (Your Code):
-  --diff                    Print the unpaginated Git diff for all targeted repos (skips other actions)
+Git Orchestration:
+  --diff                    Print the unpaginated Git diff for all targeted repos
   --commit MSG              Commit changes in target projects (blocked on 'main' and 'dev-*')
   --publish-feature         Merge current feature branch into dev branch and delete feature branch
   --drop-feature            Discard current feature branch (and uncommitted changes), return to dev
   --publish-release         Merge an integration branch into main, tag it, and bump YAML
-  --push                    Push commits to origin (If used with --publish-release, pushes main+tags)
+  --push                    Push commits to origin (Pushes main+tags if used with --publish-release)
+  --tag                     Tag targets using their YAML 'version' (e.g., 'v0.0.1')
 
 ```
 
 ---
 
-## 🧠 Advanced Template Features
+## Advanced Template Configuration
 
 ### Jinja Front-Matter Routing
 
-You can control exactly where files go, and whether they can be overwritten, by placing a tiny Jinja comment at the top of your `.j2` templates:
+Template routing and file overwrite rules can be configured using a Jinja comment block at the top of `.j2` files:
 
 ```jinja
 {#- scaffold-repo: { dest: "src/main.c", updatable: false, context: "cmake" } -#}
 
 ```
 
-* `dest`: Overrides the default output path. (By default, structural folders like `flavors/cmake-c/` are automatically stripped).
-* `updatable: false`: The engine will generate this file the first time, but will **never** attempt to overwrite it on future runs, keeping manual code safe.
-* `context`: Shifts the Jinja dictionary root to a specific sub-key (e.g., evaluating inside the `tests:` block).
+* `dest`: Overrides the default output directory.
+* `updatable: false`: Instructs the engine to generate the file on the initial run but ignore it on subsequent runs, preserving manual edits.
+* `context`: Shifts the Jinja dictionary evaluation root to a specific sub-key (e.g., scoping the template to the `tests:` block).
 
-### Raw Blocks (Protecting other template languages)
+### Template Language Isolation
 
-If you are generating files that use their own templating syntax (like Go templates for `Changie` or Liquid templates for `Jekyll`), wrap the payload in `{% raw %}` so the Jinja scanner ignores it:
+If the generated files utilize their own templating syntax (such as Go templates or Liquid), wrap the syntax in `{% raw %}` blocks to prevent the Jinja scanner from evaluating it:
 
 ```jinja
 {% raw %}
@@ -286,10 +219,7 @@ versionFormat: '## {{.Version}} - {{.Time.Format "2006-01-02"}}'
 
 ```
 
-### Automatic Path Stripping
+### Path Stripping and Sub-Application Shielding
 
-You can organize your templates into logical folders (like `flavors/cmake-c/tests/CMakeLists.txt.j2`). The engine will automatically strip the `flavors/cmake-c/` prefix and output the file cleanly to `tests/CMakeLists.txt` in the target repository.
-
-### Polyglot App Shielding
-
-Templates placed in `templates/app-resources/<flavor>/` are entirely shielded from the root generation cycle. They are exclusively routed to sub-applications defined in your YAML's `apps:` block, allowing you to mix C libraries with C++ binaries seamlessly.
+* **Automatic Stripping:** The engine automatically removes structural folder prefixes (like `flavors/cmake-c/`) when writing files to the target repository.
+* **App Shielding:** Templates located in `templates/app-resources/<flavor>/` are excluded from the root repository generation cycle. They are routed exclusively to the sub-applications defined in the `apps:` block of the library's YAML configuration.
