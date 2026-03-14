@@ -1,7 +1,3 @@
-Here is a rewritten version of the documentation. I have removed the marketing-heavy language and focused entirely on providing a clear, factual, and objective description of the tool's architecture, capabilities, and workflows.
-
----
-
 # `scaffold-repo`
 
 `scaffold-repo` is a registry-driven scaffolding engine and meta-package manager designed for C/C++ and polyglot repositories.
