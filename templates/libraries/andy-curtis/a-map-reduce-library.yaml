@@ -1,5 +1,5 @@
 project_title: A Map Reduce Library
-version: 0.0.1
+version: 0.0.3
 
 profile: andy-curtis/andy-curtis
 template: cmake-c-git
@@ -48,3 +48,18 @@ apps:
     binaries:
       substitutes_recommender:
         - src/*.c
+  07_buddies:
+    binaries:
+      buddies:
+        - src/*.c
+  08_conditional_branching:
+    binaries:
+      conditional_branching:
+        - src/main.c
+      conditional_pipeline_branching:
+        - src/main_pipeline.c
+  09_chaining:
+    binaries:
+      chaining:
+        - src/*.c
+
