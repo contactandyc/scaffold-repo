@@ -5,77 +5,30 @@ import argparse
 import posixpath
 import subprocess
 import sys
+import yaml
 from pathlib import Path
 from typing import Any
 
 from .repo_sync import verify_repo
 from .build_libs import build_all_libs
 from .config_reader import ConfigReader, _slug, _snake, _deep_merge
+from .scaffoldrc import init_scaffoldrc, find_scaffoldrc, _interactive_select
 
-
-def _interactive_select(prompt: str, options: list[str]) -> int:
-    """Renders an interactive arrow-key menu. Returns the index of the selected item."""
+def _get_active_git_project(current_dir: Path) -> str | None:
+    """Uses Git to find the root folder name of the current repository."""
     try:
-        import sys, tty, termios
-    except ImportError:
-        # Fallback for Windows
-        print(prompt)
-        for i, opt in enumerate(options):
-            print(f"  {i+1}) {opt}")
-        while True:
-            ans = input(f"Select [1-{len(options)}]: ").strip()
-            if ans.isdigit() and 1 <= int(ans) <= len(options):
-                return int(ans) - 1
-            print("Invalid selection.")
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    selected = 0
-    sys.stdout.write("\033[?25l")  # Hide cursor
-    try:
-        tty.setraw(fd)
-        while True:
-            sys.stdout.write(f"\r{prompt}\n")
-            for i, opt in enumerate(options):
-                prefix = "  ❯ " if i == selected else "    "
-                color = "\033[96m" if i == selected else ""
-                reset = "\033[0m"
-                sys.stdout.write(f"\r{prefix}{color}{opt}{reset}\033[K\n")
-
-            sys.stdout.flush()
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':  # Escape sequence
-                ch2 = sys.stdin.read(2)
-                if ch2 == '[A': selected = max(0, selected - 1)  # Up arrow
-                elif ch2 == '[B': selected = min(len(options) - 1, selected + 1)  # Down arrow
-            elif ch in ('\r', '\n'):  # Enter key
-                break
-            elif ch == '\x03':  # Ctrl-C
-                raise KeyboardInterrupt
-
-            sys.stdout.write(f"\033[{len(options) + 1}A")  # Move cursor back up
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        sys.stdout.write("\033[?25h")  # Show cursor
-        sys.stdout.flush()
-
-    # Clean up the menu output so the terminal stays clean
-    sys.stdout.write(f"\033[{len(options) + 1}A")  # Move up to prompt line
-    sys.stdout.write("\r\033[K")  # Clear the prompt line
-    sys.stdout.write("\033[J")  # Clear everything below
-    sys.stdout.flush()
-
-    return selected
-
+        res = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=current_dir, capture_output=True, text=True, check=True)
+        return Path(res.stdout.strip()).name
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
 
 def _auto_clone_target(dest: Path, item: dict, global_cfg: dict, skip_sync: bool = False) -> None:
-    """If the target folder doesn't exist, try to clone it. If it exists, pull latest (unless skipped)."""
     if dest.exists():
         if not skip_sync and (dest / ".git").exists():
             print(f"  [Auto-Sync] Pulling latest changes for {dest.name}...")
             res = subprocess.run(["git", "pull", "--rebase", "--autostash"], cwd=dest, capture_output=True, text=True)
             if res.returncode != 0:
-                print(f"  ! [Auto-Sync] Warning: Could not pull latest for {dest.name}. (Might be offline or have conflicts).")
+                print(f"  ! [Auto-Sync] Warning: Could not pull latest for {dest.name}.")
         return
 
     url = item.get("url")
@@ -92,34 +45,27 @@ def _auto_clone_target(dest: Path, item: dict, global_cfg: dict, skip_sync: bool
             print(f"  [Auto-Clone] Successfully cloned {url}.")
             return
         else:
-            print(f"  [Auto-Clone] Clone failed or repository not found. Initializing empty repo.")
+            print(f"  [Auto-Clone] Clone failed. Initializing empty repo.")
     else:
-        print("  [Auto-Clone] No URL or github_project defined. Initializing empty repo.")
+        print("  [Auto-Clone] No URL defined. Initializing empty repo.")
 
     dest.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init"], cwd=dest, capture_output=True)
 
-
 def _resume_feature(dest: Path, name: str, global_cfg: dict) -> None:
-    """Finds open feature branches and lets the user interactively select one to checkout."""
     if not (dest / ".git").exists():
         return
-
-    approved_prefixes = global_cfg.get("branch_prefixes", {
-        "feat": "", "fix": "", "docs": "", "chore": "", "refactor": "", "test": ""
-    })
+    approved_prefixes = global_cfg.get("branch_prefixes", {"feat": "", "fix": "", "docs": "", "chore": "", "refactor": "", "test": ""})
     if isinstance(approved_prefixes, list):
         approved_prefixes = {p: "" for p in approved_prefixes}
 
     res = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=dest, capture_output=True, text=True)
     branches = [b.strip() for b in res.stdout.splitlines() if b.strip()]
-
     features = [b for b in branches if "/" in b and b.split("/")[0] in approved_prefixes]
 
     if not features:
         print(f"  [Features] No active feature branches to resume for '{name}'.")
         return
-
     try:
         idx = _interactive_select(f"  [Features] Select a feature branch to resume for '{name}':", features)
         selected = features[idx]
@@ -128,121 +74,64 @@ def _resume_feature(dest: Path, name: str, global_cfg: dict) -> None:
     except KeyboardInterrupt:
         print("\n  - Aborted feature selection.")
 
-
 def _start_feature(dest: Path, name: str, item: dict, global_cfg: dict, feature_raw: str, assume_yes: bool = False) -> bool:
-    """Enforces the main -> dev-vX.X.X -> feat/name branching topology. Returns True if successful."""
-    if not (dest / ".git").exists():
-        return True
-
-    # --- SAFETY CHECK: Prevent branching with uncommitted changes ---
+    if not (dest / ".git").exists(): return True
     status = subprocess.run(["git", "status", "--porcelain"], cwd=dest, capture_output=True, text=True)
     if status.stdout.strip():
         print(f"  \033[93m! Warning: '{name}' has uncommitted changes.\033[0m")
-        print("    Please commit or stash your work before starting a new feature.")
         return False
-    # ----------------------------------------------------------------
 
-    # 1. Fetch Configured Standards
-    default_prefixes = {
-        "feat": "A new feature",
-        "fix": "A bug fix",
-        "docs": "Documentation only changes",
-        "chore": "Build process or tool changes"
-    }
-    approved_prefixes = global_cfg.get("branch_prefixes", default_prefixes)
+    approved_prefixes = global_cfg.get("branch_prefixes", {"feat": "A new feature", "fix": "A bug fix"})
+    if isinstance(approved_prefixes, list): approved_prefixes = {p: "" for p in approved_prefixes}
 
-    if isinstance(approved_prefixes, list):
-        approved_prefixes = {p: "" for p in approved_prefixes}
-
-    # 2. Normalize and Validate feature branch name
     if "/" in feature_raw:
         prefix, branch_name = feature_raw.split("/", 1)
-
         if prefix not in approved_prefixes:
             print(f"  \033[91m! Error: Branch prefix '{prefix}' is not approved.\033[0m")
-            print("    Approved options:")
-            for p_key, p_desc in approved_prefixes.items():
-                desc_str = f"- {p_desc}" if p_desc else ""
-                print(f"      {p_key:<10} {desc_str}")
             return False
-
         feature_name = f"{prefix}/{branch_name}"
     else:
-        # INTERACTIVE WIZARD
         if assume_yes:
-            default_prefix = next(iter(approved_prefixes.keys())) if approved_prefixes else "feat"
-            feature_name = f"{default_prefix}/{feature_raw}"
-            print(f"  - Auto-selected prefix '{default_prefix}' due to --assume-yes")
+            feature_name = f"{next(iter(approved_prefixes.keys()))}/{feature_raw}"
         else:
             prefixes_list = list(approved_prefixes.keys())
-            display_opts = []
-            for p_key in prefixes_list:
-                p_desc = approved_prefixes[p_key]
-                desc_str = f"- {p_desc}" if p_desc else ""
-                display_opts.append(f"{p_key:<10} {desc_str}")
-
+            display_opts = [f"{k:<10} - {v}" for k, v in approved_prefixes.items()]
             try:
-                idx = _interactive_select(f"  > Select a prefix for your new branch '{feature_raw}':", display_opts)
-                selected_prefix = prefixes_list[idx]
+                idx = _interactive_select(f"  > Select a prefix for branch '{feature_raw}':", display_opts)
+                feature_name = f"{prefixes_list[idx]}/{feature_raw}"
             except KeyboardInterrupt:
-                print("\n  - Aborted branch creation.")
                 return False
 
-            feature_name = f"{selected_prefix}/{feature_raw}"
-            print(f"  ✓ Using branch name: \033[96m{feature_name}\033[0m")
-    # 3. Determine default and target dev branch
     res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
     default_branch = "main" if "main" in res_main.stdout else "master"
-
     current_version = str(item.get("version", "0.0.1")).strip()
     parts = current_version.replace("v", "").split(".")
-
-    if len(parts) == 3 and parts[2].isdigit():
-        next_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}"
-    else:
-        next_version = f"{current_version}-next"
-
+    next_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
     dev_branch = f"dev-v{next_version}"
 
-    print(f"  [Branch] Preparing topology for {name}...")
-
-    # 4. Make sure dev branch exists locally
     check_dev = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{dev_branch}"], cwd=dest)
     if check_dev.returncode != 0:
         subprocess.run(["git", "checkout", default_branch], cwd=dest, capture_output=True)
         subprocess.run(["git", "pull", "--rebase"], cwd=dest, capture_output=True)
         subprocess.run(["git", "checkout", "-b", dev_branch], cwd=dest, capture_output=True)
-        print(f"  - Created integration branch '{dev_branch}' from '{default_branch}'.")
     else:
         subprocess.run(["git", "checkout", dev_branch], cwd=dest, capture_output=True)
 
-    # 5. Create and checkout the feature branch from the dev branch
     check_feat = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{feature_name}"], cwd=dest)
     if check_feat.returncode == 0:
         subprocess.run(["git", "checkout", feature_name], cwd=dest, capture_output=True)
-        print(f"  ✓ Checked out existing feature branch '{feature_name}'.")
     else:
         subprocess.run(["git", "checkout", "-b", feature_name], cwd=dest, capture_output=True)
-        print(f"  ✓ Created new feature branch '{feature_name}' off of '{dev_branch}'.")
-
     return True
 
-
 def _update_yaml_version(tmpl_dir: Path, raw_token: str, new_version: str) -> None:
-    """Finds the source YAML file and intelligently updates its version line."""
-    if not tmpl_dir:
-        return
-
+    if not tmpl_dir: return
     possible_paths = [
-        tmpl_dir / "libraries" / f"{raw_token}.yaml",
-        tmpl_dir / "libraries" / f"{raw_token}.yml",
-        tmpl_dir / "apps" / f"{raw_token}.yaml",
-        tmpl_dir / "apps" / f"{raw_token}.yml",
+        tmpl_dir / "libraries" / f"{raw_token}.yaml", tmpl_dir / "libraries" / f"{raw_token}.yml",
+        tmpl_dir / "apps" / f"{raw_token}.yaml", tmpl_dir / "apps" / f"{raw_token}.yml",
         ]
-
     target_file = next((p for p in possible_paths if p.exists()), None)
-    if not target_file:
-        return
+    if not target_file: return
 
     lines = target_file.read_text(encoding="utf-8").splitlines()
     updated = False
@@ -251,19 +140,13 @@ def _update_yaml_version(tmpl_dir: Path, raw_token: str, new_version: str) -> No
             lines[i] = f"version: {new_version}"
             updated = True
             break
-
     if updated:
         target_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        try:
-            rel_path = target_file.relative_to(Path.cwd())
-        except ValueError:
-            rel_path = target_file.name
-        print(f"  ✓ Updated registry ({rel_path}) to version: {new_version}")
-
 
 def _resolve_projects(reader: ConfigReader, projects: list[str]) -> list[tuple[str, str, str, dict]]:
-    """Resolve project tokens to (display_name, slug, raw_token, item_dict)."""
     for p in projects:
+        if p.startswith(("http://", "https://", "git@")):
+            continue # Skip YAML loading for direct URLs
         if "/" in p:
             for pth in [f"libraries/{p}.yaml", f"apps/{p}.yaml"]:
                 data = reader.tmpl_src._load_logical_path(pth)
@@ -282,23 +165,29 @@ def _resolve_projects(reader: ConfigReader, projects: list[str]) -> list[tuple[s
     by_name_lower = {v["name"].lower(): k for k, v in idx.items()}
     by_snake = {v["snake"]: k for k, v in idx.items()}
 
-    def needs_scaffolding(item: dict) -> bool:
-        return bool(item.get("template"))
+    def needs_scaffolding(item: dict) -> bool: return bool(item.get("template"))
 
     out: list[tuple[str, str, str, dict]] = []
     for p in projects:
+        if p.startswith(("http://", "https://", "git@")):
+            url = p
+            clean_url = url.split("+", 1)[-1] if "+" in str(url) else str(url)
+            clean_url = clean_url.split("@", 1)[0]
+            name = clean_url.split("/")[-1].replace(".git", "")
+            slug = _slug(name)
+            out.append((name, slug, name, {"url": url}))
+            continue
+
         if p.lower() == "all":
             cands = [s for s, v in idx.items() if needs_scaffolding(v["item"])]
             ordered = reader._toposort_subset(idx, cands)
             out.extend([(idx[s]["name"], s, idx[s].get("raw_key", s), idx[s]["item"]) for s in ordered])
             continue
-
         namespace_cands = [s for s, v in idx.items() if str(v.get("raw_key", "")).startswith(f"{p}/") and needs_scaffolding(v["item"])]
         if namespace_cands:
             ordered = reader._toposort_subset(idx, namespace_cands)
             out.extend([(idx[s]["name"], s, idx[s]["raw_key"], idx[s]["item"]) for s in ordered])
             continue
-
         slug = _slug(p)
         key = slug if slug in idx else by_snake.get(_snake(p), by_name_lower.get(p.lower()))
         if key:
@@ -312,27 +201,16 @@ def _resolve_projects(reader: ConfigReader, projects: list[str]) -> list[tuple[s
             uniq.append((name, slug, raw_token, item))
     return uniq
 
-
 def _print_text_result(res: dict[str, Any]) -> None:
     s = res.get("summary", {})
     print(f"\n\033[1m=== {res['repo']} ===\033[0m")
-    print(
-        "files_checked: {fc}  headers_added: {ha}  headers_updated: {hu}  unchanged: {un}".format(
-            fc=s.get("files_checked", 0),
-            ha=s.get("headers_added", 0),
-            hu=s.get("headers_updated", 0),
-            un=s.get("unchanged", 0),
-        )
-    )
-    if s.get("profiles_used"):
-        print(f"profiles_used: {', '.join(s['profiles_used'])}")
+    print(f"files_checked: {s.get('files_checked', 0)}  headers_added: {s.get('headers_added', 0)}  headers_updated: {s.get('headers_updated', 0)}  unchanged: {s.get('unchanged', 0)}")
+    if s.get("profiles_used"): print(f"profiles_used: {', '.join(s['profiles_used'])}")
     for it in res.get("issues", []):
         kind = it.get("type", "issue")
-        if "file" in it:
-            print(f"- {kind}: {it['file']}")
-        else:
-            print(f"- {kind}: {it.get('message', '')}")
+        print(f"- {kind}: {it['file']}" if "file" in it else f"- {kind}: {it.get('message', '')}")
 
+# --- MAIN EXECUTION ---
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -340,68 +218,114 @@ def main(argv: list[str] | None = None) -> int:
         description="The Declarative Fleet Manager: Scaffold repos, enforce OSS, orchestrate builds, and sync to Git."
     )
 
-    ap.add_argument(
-        "projects",
-        nargs="*",
-        help="One or more projects/namespaces to scaffold or build (e.g., 'andy-curtis/a-bitset-library', 'common', 'all')"
-    )
+    ap.add_argument("--init", action="store_true", help="Initialize a .scaffoldrc workspace configuration")
+    ap.add_argument("projects", nargs="*", help="One or more projects/namespaces to scaffold or build")
 
     grp_ws = ap.add_argument_group("Workspace Options")
-    grp_ws.add_argument("-C", "--cwd", type=Path, default=Path("."), help="Run as if started in <PATH> (default: current dir)")
-    grp_ws.add_argument("--templates-dir", type=Path, default=None, help="Override templates directory (auto-detects ./templates)")
-    grp_ws.add_argument("--start-feature", nargs="?", const="", metavar="NAME", help="Start a feature branch (leave empty to list features)")
+    grp_ws.add_argument("-C", "--cwd", type=Path, default=Path("."), help="Run as if started in <PATH>")
+    grp_ws.add_argument("--templates-dir", type=Path, default=None, help="Override templates directory")
+    grp_ws.add_argument("--start-feature", nargs="?", const="", metavar="NAME", help="Start a feature branch")
 
     grp_sc = ap.add_argument_group("Scaffolding Options")
-    grp_sc.add_argument("--diff", action="store_true", help="Print unpaginated Git diffs for all targeted repos")
+    grp_sc.add_argument("--update", action="store_true", help="Explicitly apply template updates to the repositories")
+    grp_sc.add_argument("--diff", action="store_true", help="Print unpaginated Git diffs")
     grp_sc.add_argument("-y", "--assume-yes", action="store_true", help="Apply template updates without prompting")
-    grp_sc.add_argument("--show-diffs", action="store_true", help="Print inline diffs before applying file updates")
-    grp_sc.add_argument("--no-prompt", action="store_true", help="Do not prompt during SPDX license header fixups")
+    grp_sc.add_argument("--show-diffs", action="store_true", help="Print inline diffs before applying updates")
+    grp_sc.add_argument("--no-prompt", action="store_true", help="Do not prompt during SPDX fixes")
 
     grp_dp = ap.add_argument_group("Dependency Lifecycle")
-    grp_dp.add_argument("--clone-deps", action="store_true", help="Fetch external dependencies without compiling")
+    grp_dp.add_argument("--clone-deps", action="store_true", help="Fetch external dependencies")
     grp_dp.add_argument("--build-deps", action="store_true", help="Fetch and compile external dependencies")
-    grp_dp.add_argument("--install-deps", action="store_true", help="Fetch, compile, and install external dependencies")
+    grp_dp.add_argument("--install-deps", action="store_true", help="Fetch, compile, and install dependencies")
 
-    grp_tl = ap.add_argument_group("Target Lifecycle (Your Code)")
-    grp_tl.add_argument("--build", action="store_true", help="Run './build.sh build' on the scaffolded projects")
-    grp_tl.add_argument("--install", action="store_true", help="Run './build.sh install' on the scaffolded projects")
+    grp_tl = ap.add_argument_group("Target Lifecycle")
+    grp_tl.add_argument("--build", action="store_true", help="Run './build.sh build'")
+    grp_tl.add_argument("--install", action="store_true", help="Run './build.sh install'")
 
-    grp_git = ap.add_argument_group("Git Orchestration (Your Code)")
-    grp_git.add_argument("--commit", type=str, metavar="MSG", help="Commit changes in target projects (blocked on 'main' and 'dev-*')")
-    grp_git.add_argument("--publish-feature", action="store_true", help="Merge current feature branch into dev branch and delete feature branch")
-    grp_git.add_argument("--publish-release", action="store_true", help="Merge an integration branch into main, tag it, and bump YAML")
-    grp_git.add_argument("--drop-feature", action="store_true", help="Discard current feature branch (and uncommitted changes), return to dev")
-    grp_git.add_argument("--push", action="store_true", help="Push commits to origin (Pushes tags and handles remote deletion if publishing)")
+    grp_git = ap.add_argument_group("Git Orchestration")
+    grp_git.add_argument("--commit", type=str, metavar="MSG", help="Commit changes")
+    grp_git.add_argument("--publish-feature", action="store_true", help="Merge feature to dev")
+    grp_git.add_argument("--publish-release", action="store_true", help="Merge dev to main and tag")
+    grp_git.add_argument("--drop-feature", action="store_true", help="Discard feature branch")
+    grp_git.add_argument("--push", action="store_true", help="Push commits")
 
     args = ap.parse_args(argv)
     root = args.cwd.resolve()
 
-    tmpl_dir = args.templates_dir.resolve() if args.templates_dir else None
-    if not tmpl_dir and (root / "templates").is_dir():
-        tmpl_dir = root / "templates"
+    if args.init:
+        return init_scaffoldrc()
 
+    # Resolve Workspace & Templates
+    rc = find_scaffoldrc(root)
+    rc_scaffold_dir = rc.get("scaffold_dir")
+
+    tmpl_dir = args.templates_dir.resolve() if args.templates_dir else None
+    if not tmpl_dir:
+        if (root / "templates").is_dir():
+            tmpl_dir = root / "templates"
+        elif rc_scaffold_dir and (Path(rc_scaffold_dir) / "templates").is_dir():
+            tmpl_dir = Path(rc_scaffold_dir) / "templates"
+
+    # Auto-Detect Target Project
     project_tokens = args.projects
+    if not project_tokens and not args.diff:
+        active_proj = _get_active_git_project(root)
+        if active_proj:
+            print(f"🎯 Auto-detected context: \033[96m{active_proj}\033[0m")
+            project_tokens = [active_proj]
+
     results: list[dict[str, Any]] = []
     exit_code = 0
 
     try:
         reader = ConfigReader(root, project_name=None, templates_dir=(tmpl_dir.as_posix() if tmpl_dir else None))
         reader.load()
-        targets = _resolve_projects(reader, project_tokens) if project_tokens else []
-        workspace_dir = reader.effective_config.get("workspace_dir", "../repos")
 
-        # --- SHORT CIRCUIT: PURE GIT DIFF OUTPUT ---
+        # --- PATH FIX: Enforce an absolute workspace path globally ---
+        ws_str = rc.get("workspace_dir") or reader.effective_config.get("workspace_dir", "../repos")
+        workspace_dir = Path(ws_str).expanduser()
+        if not workspace_dir.is_absolute():
+            workspace_dir = (root / workspace_dir).resolve()
+
+        reader.effective_config["workspace_dir"] = str(workspace_dir)
+
+        # --- CLI ALIAS EXPANSION ---
+        aliases = {}
+        alias_file = tmpl_dir / "resources" / "aliases.yaml" if tmpl_dir else None
+        if alias_file and alias_file.exists():
+            try:
+                alias_data = yaml.safe_load(alias_file.read_text(encoding="utf-8")) or {}
+                if isinstance(alias_data, dict):
+                    aliases.update(alias_data)
+            except Exception as e:
+                print(f"Warning: Failed to parse aliases file: {e}", file=sys.stderr)
+
+        expanded_tokens = []
+        for p in project_tokens:
+            if p in aliases:
+                val = aliases[p]
+                if isinstance(val, (list, tuple)):
+                    expanded_tokens.extend(str(x) for x in val)
+                else:
+                    expanded_tokens.append(str(val))
+            else:
+                expanded_tokens.append(p)
+        # ---------------------------
+
+        targets = _resolve_projects(reader, expanded_tokens) if expanded_tokens else []
+
+        # --- SAFETY RAIL: Abort if targets couldn't be resolved ---
+        if project_tokens and not targets:
+            print(f"\n❌ Error: Could not resolve any valid projects from: {project_tokens}")
+            print(f"   Check your spelling or ensure your templates/resources/aliases.yaml is defined correctly.")
+            return 1
+
         if args.diff:
             print("\n\033[1m=== Fleet Git Diffs ===\033[0m")
-            if not targets:
-                targets = [("Root Repo", "root", None, {})]
-
+            if not targets: targets = [("Root Repo", "root", None, {})]
             for name, slug, raw_token, item in targets:
-                dest = root if not raw_token else root / workspace_dir / _slug(posixpath.basename(raw_token))
-
-                # Use raw_token for the display label (e.g. 'andy-curtis/a-bitset-library')
+                dest = root if not raw_token else workspace_dir / _slug(posixpath.basename(raw_token))
                 display_label = raw_token if raw_token else name
-
                 if (dest / ".git").exists():
                     status = subprocess.run(["git", "status", "--porcelain"], cwd=dest, capture_output=True, text=True)
                     if status.stdout.strip():
@@ -415,139 +339,154 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"\033[90mREPO-MISSING:\033[0m {display_label} (Not cloned/No .git directory)")
             return 0
 
-        # --- PRE-COMPUTE PIPELINE BYPASSES ---
-        skip_templates = False
-        if args.drop_feature or args.publish_feature or args.publish_release:
-            skip_templates = True
-        elif (args.commit or args.push) and not (args.assume_yes or args.show_diffs or (args.start_feature is not None)):
-            skip_templates = True
+        # --- EXECUTION POSTURE ---
+        # Read-only by default. We only mutate files if explicitly requested.
+        skip_templates = True
+        if args.update or args.assume_yes or args.show_diffs:
+            skip_templates = False
 
-        # --- PHASE 1: Scaffolding Target Projects ---
+        # --- PHASE 1: Initialize Targets ---
         if targets:
             for name, slug, raw_token, item in targets:
-                folder_name = _slug(posixpath.basename(raw_token))
-                dest = root / workspace_dir / folder_name
+                dest = workspace_dir / _slug(posixpath.basename(raw_token))
 
-                # If the user just wants to list features, don't do the heavy sync and scaffold steps
                 if args.start_feature == "":
                     _resume_feature(dest, name, reader.effective_config)
                     continue
 
-                print(f"\n\033[95m=== Scaffolding {name} ({slug}) into {dest} ===\033[0m")
+                print(f"\n\033[95m=== Initializing {name} ({slug}) into {dest} ===\033[0m")
                 dest = dest.resolve()
 
-                # 1. Ensure repo exists and is synced (Bypassed for Git-only runs to prevent rebase errors on dirty trees)
                 _auto_clone_target(dest, item, reader.effective_config, skip_sync=skip_templates)
 
-                # 2. Enforce the Main -> Dev -> Feature topology
+                # --- INTELLIGENT UPDATE BRANCHING ---
+                if args.update and (dest / ".git").exists():
+                    res = subprocess.run(["git", "branch", "--show-current"], cwd=dest, capture_output=True, text=True)
+                    current_branch = res.stdout.strip()
+                    res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
+                    default_branch = "main" if "main" in res_main.stdout else "master"
+
+                    if current_branch == default_branch or current_branch.startswith("dev-"):
+                        scaffold_branch = "chore/update-scaffolding"
+                        print(f"  - Protected branch '{current_branch}' detected. Moving to '{scaffold_branch}'.")
+                        check_feat = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{scaffold_branch}"], cwd=dest)
+                        if check_feat.returncode == 0:
+                            subprocess.run(["git", "checkout", scaffold_branch], cwd=dest, capture_output=True)
+                        else:
+                            subprocess.run(["git", "checkout", "-b", scaffold_branch], cwd=dest, capture_output=True)
+                    else:
+                        print(f"  - Already on working branch '{current_branch}'. Applying updates directly.")
+
+                # --- EXPLICIT FEATURE START ---
                 if args.start_feature is not None:
                     if not _start_feature(dest, name, item, reader.effective_config, args.start_feature, args.assume_yes):
                         print("  \033[91m! Skipping scaffolding for this repo.\033[0m")
                         exit_code = max(exit_code, 1)
                         continue
 
-                # 3. Apply templates (Bypassed if pure Git operation)
-                if skip_templates:
-                    print("  - Bypassing template verification (Git operation only).")
-                else:
-                    code, res = verify_repo(
-                        dest,
-                        fix_licenses=True,
-                        no_prompt=args.no_prompt,
-                        project_name=raw_token,
-                        templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
-                        assume_yes=args.assume_yes,
-                        show_diffs=args.show_diffs,
-                    )
-                    exit_code = max(exit_code, code)
-                    results.append(res)
-
-        else:
-            print(f"\n\033[95m=== Scaffolding in-place ({root}) ===\033[0m")
-            if skip_templates:
-                print("  - Bypassing template verification (Git operation only).")
-            else:
-                code, res = verify_repo(
-                    root,
-                    fix_licenses=True,
-                    no_prompt=args.no_prompt,
-                    project_name=None,
+        # --- PHASE 2: Fetch Dependency Graph BEFORE Scaffolding ---
+        target_dirs = [workspace_dir / _slug(posixpath.basename(t[2])) for t in targets] if targets else [root]
+        for t_dir in target_dirs:
+            if t_dir.exists():
+                build_all_libs(
+                    repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
                     templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
-                    assume_yes=args.assume_yes,
-                    show_diffs=args.show_diffs,
+                    do_clone=True, do_build=False, do_install=False # FETCH ONLY
+                )
+
+        # --- PHASE 3: Scaffolding (Templates now have full visibility) ---
+        if targets:
+            for name, slug, raw_token, item in targets:
+                dest = workspace_dir / _slug(posixpath.basename(raw_token))
+                if skip_templates or not dest.exists():
+                    print(f"  - Bypassing template verification for {name} (Read-only / Git operation).")
+                    continue
+                code, res = verify_repo(
+                    dest, fix_licenses=True, no_prompt=args.no_prompt, project_name=name,
+                    templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                    assume_yes=args.assume_yes, show_diffs=args.show_diffs,
+                )
+                exit_code = max(exit_code, code)
+                results.append(res)
+        elif not project_tokens: # <--- SAFETY RAIL: Only scaffold in-place if no projects were explicitly requested
+            print(f"\n\033[95m=== Scaffolding in-place ({root}) ===\033[0m")
+            if not skip_templates:
+                code, res = verify_repo(
+                    root, fix_licenses=True, no_prompt=args.no_prompt, project_name=None,
+                    templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                    assume_yes=args.assume_yes, show_diffs=args.show_diffs,
                 )
                 exit_code = max(exit_code, code)
                 results.append(res)
 
-        # --- PHASE 2: External Dependencies ---
-        if args.clone_deps or args.build_deps or args.install_deps:
-            build_all_libs(
-                repo=root,
-                project_tokens=project_tokens,
-                templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
-                do_clone=args.clone_deps,
-                do_build=args.build_deps,
-                do_install=args.install_deps,
-            )
+        # --- PHASE 4: Build Dependencies ---
+        if args.build_deps or args.install_deps:
+            for t_dir in target_dirs:
+                if t_dir.exists():
+                    build_all_libs(
+                        repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
+                        templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                        do_clone=False, do_build=args.build_deps, do_install=args.install_deps
+                    )
 
-        # --- PHASE 3: First-Party Build Orchestration ---
+        # --- PHASE 5: First-Party Build Orchestration ---
         if targets and (args.build or args.install):
-            print("\n\033[1m=== Phase 3: First-Party Build Orchestration ===\033[0m")
+            print("\n\033[1m=== Phase 5: First-Party Build Orchestration ===\033[0m")
             for name, slug, raw_token, item in targets:
-                dest = root / workspace_dir / _slug(posixpath.basename(raw_token))
+                dest = workspace_dir / _slug(posixpath.basename(raw_token))
+                if not dest.exists(): continue
                 cmd = "install" if args.install else "build"
-
                 print(f"\n🚀 Running './build.sh {cmd}' for {name}...")
                 subprocess.run(["./build.sh", cmd], cwd=dest, check=True)
 
-        # --- PHASE 4: Git Orchestration ---
+        # --- PHASE 6: Git Orchestration ---
         if targets and (args.commit or args.publish_feature or args.publish_release or args.drop_feature or args.push):
-            print("\n\033[1m=== Phase 4: Git Orchestration ===\033[0m")
-
+            print("\n\033[1m=== Phase 6: Git Orchestration ===\033[0m")
             for name, slug, raw_token, item in targets:
-                dest = root / workspace_dir / _slug(posixpath.basename(raw_token))
-
-                if not (dest / ".git").exists():
-                    print(f"  [Git] Skipping {name}: Not a git repository.")
-                    continue
+                dest = workspace_dir / _slug(posixpath.basename(raw_token))
+                if not (dest / ".git").exists(): continue
 
                 print(f"\n📦 Syncing {name} to Git...")
-
                 res = subprocess.run(["git", "branch", "--show-current"], cwd=dest, capture_output=True, text=True)
                 current_branch = res.stdout.strip()
-
                 res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
                 default_branch = "main" if "main" in res_main.stdout else "master"
 
-                # 1. COMMIT LOGIC (Protected)
+                # Check if the tree is currently dirty
+                status = subprocess.run(["git", "status", "--porcelain"], cwd=dest, capture_output=True, text=True)
+                is_dirty = bool(status.stdout.strip())
+
+                # --- THE GITOPS AUTO-COMMIT ---
+                if args.publish_feature and current_branch == "chore/update-scaffolding" and is_dirty:
+                    print(f"  [Auto-Commit] Committing scaffolding updates on '{current_branch}' before publishing...")
+                    subprocess.run(["git", "add", "-A"], cwd=dest, check=True)
+                    subprocess.run(["git", "commit", "-m", "chore: apply scaffolding updates"], cwd=dest, check=True)
+                    is_dirty = False # Tree is now clean and ready to publish
+
                 if args.commit:
                     if current_branch == default_branch or current_branch.startswith("dev-"):
                         print(f"  ! Cannot commit directly to '{current_branch}'. Start a feature branch first.")
+                    elif is_dirty:
+                        subprocess.run(["git", "add", "-A"], cwd=dest, check=True)
+                        subprocess.run(["git", "commit", "-m", args.commit], cwd=dest, check=True)
+                        print(f"  ✓ Committed changes to '{current_branch}': '{args.commit}'")
+                        is_dirty = False
                     else:
-                        status = subprocess.run(["git", "status", "--porcelain"], cwd=dest, capture_output=True, text=True)
-                        if status.stdout.strip():
-                            subprocess.run(["git", "add", "-A"], cwd=dest, check=True)
-                            subprocess.run(["git", "commit", "-m", args.commit], cwd=dest, check=True)
-                            print(f"  ✓ Committed changes to '{current_branch}': '{args.commit}'")
-                        else:
-                            print(f"  - No changes to commit on '{current_branch}'.")
+                        print(f"  - No changes to commit on '{current_branch}'.")
 
-                # 2. STANDARD PUSH LOGIC (Protected, non-merge)
                 if args.push and not (args.publish_release or args.publish_feature or args.drop_feature):
                     if current_branch == default_branch or current_branch.startswith("dev-"):
                         print(f"  ! Cannot push directly to '{current_branch}'. Use a feature branch or publish commands.")
                     else:
                         print(f"  - Pushing branch '{current_branch}' to origin...")
                         res = subprocess.run(["git", "push", "-u", "origin", current_branch], cwd=dest, capture_output=True, text=True)
-                        if res.returncode == 0:
-                            print(f"  ✓ Pushed '{current_branch}'.")
-                        else:
-                            print(f"  ! Failed to push: {res.stderr.strip()}")
+                        if res.returncode == 0: print(f"  ✓ Pushed '{current_branch}'.")
+                        else: print(f"  ! Failed to push: {res.stderr.strip()}")
 
-                # 3. MERGE FEATURE TO DEV (Publish Feature)
                 if args.publish_feature:
-                    if current_branch == default_branch or current_branch.startswith("dev-"):
-                        print(f"  ! Cannot publish from '{current_branch}'. Must be on an active feature branch.")
+                    if current_branch == default_branch or current_branch.startswith("dev-"): continue
+                    if is_dirty:
+                        print(f"  \033[91m❌ Blocked: Cannot publish '{name}' because it has uncommitted changes on '{current_branch}'.\033[0m")
                         continue
 
                     current_version = str(item.get("version", "0.0.1")).strip()
@@ -555,152 +494,71 @@ def main(argv: list[str] | None = None) -> int:
                     guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
                     default_dev = f"dev-v{guess_version}"
 
-                    if args.assume_yes:
-                        target_dev = default_dev
-                        print(f"  - Auto-selected integration branch: '{target_dev}'")
-                    else:
-                        ans = input(f"  > Merge '{current_branch}' into which dev branch? [{default_dev}]: ").strip()
-                        target_dev = ans if ans else default_dev
-
-                    check_b = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target_dev}"], cwd=dest)
-                    if check_b.returncode != 0:
-                        print(f"  ! Integration branch '{target_dev}' not found locally. Skipping.")
-                        continue
+                    target_dev = default_dev if args.assume_yes else (input(f"  > Merge '{current_branch}' into which dev branch? [{default_dev}]: ").strip() or default_dev)
+                    if subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target_dev}"], cwd=dest).returncode != 0: continue
 
                     print(f"  - Merging '{current_branch}' into '{target_dev}'...")
                     subprocess.run(["git", "checkout", target_dev], cwd=dest, capture_output=True)
                     subprocess.run(["git", "pull", "--rebase", "origin", target_dev], cwd=dest, capture_output=True)
-                    merge_res = subprocess.run(["git", "merge", current_branch, "--no-ff", "-m", f"Merge feature '{current_branch}'"], cwd=dest, capture_output=True, text=True)
-
-                    if merge_res.returncode != 0:
-                        print(f"  ! Merge conflict in {name}. Aborting merge.")
+                    if subprocess.run(["git", "merge", current_branch, "--no-ff", "-m", f"Merge feature '{current_branch}'"], cwd=dest, capture_output=True, text=True).returncode != 0:
                         subprocess.run(["git", "merge", "--abort"], cwd=dest, capture_output=True)
                         continue
-                    print(f"  ✓ Merged '{current_branch}' into '{target_dev}'.")
 
                     subprocess.run(["git", "branch", "-d", current_branch], cwd=dest, capture_output=True)
-                    print(f"  ✓ Deleted local feature branch '{current_branch}'.")
-
                     if args.push:
-                        print(f"  - Pushing '{target_dev}' to origin...")
-                        res_dev = subprocess.run(["git", "push", "origin", target_dev], cwd=dest, capture_output=True, text=True)
-                        if res_dev.returncode == 0:
-                            print(f"  ✓ Pushed '{target_dev}'.")
-                        else:
-                            print(f"  ! Failed to push '{target_dev}'.")
+                        subprocess.run(["git", "push", "origin", target_dev], cwd=dest, capture_output=True)
+                        subprocess.run(["git", "push", "origin", "--delete", current_branch], cwd=dest, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                        # Try to delete remote feature branch silently
-                        subprocess.run(
-                            ["git", "push", "origin", "--delete", current_branch],
-                            cwd=dest,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL
-                        )
-
-                # 4. MERGE DEV TO MAIN & TAG (Publish Release)
                 if args.publish_release:
+                    if is_dirty:
+                        print(f"  \033[91m❌ Blocked: Cannot publish release for '{name}' because it has uncommitted changes.\033[0m")
+                        continue
+
                     current_version = str(item.get("version", "0.0.1")).strip()
                     parts = current_version.replace("v", "").split(".")
-
                     guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
                     default_dev = f"dev-v{guess_version}"
 
-                    if args.assume_yes:
-                        release_branch = default_dev
-                        print(f"  - Auto-selected release branch: '{release_branch}'")
-                    else:
-                        ans = input(f"  > Which integration branch are we releasing? [{default_dev}]: ").strip()
-                        release_branch = ans if ans else default_dev
-
-                    check_b = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{release_branch}"], cwd=dest)
-                    if check_b.returncode != 0:
-                        print(f"  ! Integration branch '{release_branch}' not found locally. Skipping.")
-                        continue
+                    release_branch = default_dev if args.assume_yes else (input(f"  > Which integration branch are we releasing? [{default_dev}]: ").strip() or default_dev)
+                    if subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{release_branch}"], cwd=dest).returncode != 0: continue
 
                     tag_name = release_branch[4:] if release_branch.startswith("dev-") else f"v{guess_version}"
-
-                    print(f"  - Merging '{release_branch}' into '{default_branch}'...")
-
                     subprocess.run(["git", "checkout", default_branch], cwd=dest, capture_output=True)
                     subprocess.run(["git", "pull", "--rebase", "origin", default_branch], cwd=dest, capture_output=True)
-                    merge_res = subprocess.run(["git", "merge", release_branch, "--no-ff", "-m", f"Release {tag_name}"], cwd=dest, capture_output=True, text=True)
-
-                    if merge_res.returncode != 0:
-                        print(f"  ! Merge conflict in {name}. Aborting merge.")
+                    if subprocess.run(["git", "merge", release_branch, "--no-ff", "-m", f"Release {tag_name}"], cwd=dest, capture_output=True, text=True).returncode != 0:
                         subprocess.run(["git", "merge", "--abort"], cwd=dest, capture_output=True)
                         continue
-                    print(f"  ✓ Merged '{release_branch}' into '{default_branch}'.")
 
-                    # Apply Tag
                     check_tag = subprocess.run(["git", "tag", "-l", tag_name], cwd=dest, capture_output=True, text=True)
-                    if tag_name in check_tag.stdout.split():
-                        print(f"  - Tag '{tag_name}' already exists locally. Skipping tag creation.")
-                    else:
-                        res = subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Release {tag_name}"], cwd=dest, capture_output=True, text=True)
-                        if res.returncode == 0:
-                            print(f"  ✓ Created tag '{tag_name}'")
-                        else:
-                            print(f"  ! Failed to create tag '{tag_name}'.")
+                    if tag_name not in check_tag.stdout.split():
+                        subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Release {tag_name}"], cwd=dest, capture_output=True, text=True)
 
-                    # UPDATE YAML REGISTRY
                     if tmpl_dir:
                         new_yaml_version = tag_name[1:] if tag_name.startswith("v") else tag_name
                         _update_yaml_version(tmpl_dir, raw_token, new_yaml_version)
 
-                    # Push Release
                     if args.push:
-                        print(f"  - Pushing '{default_branch}' and '{tag_name}' to origin...")
-                        res_main = subprocess.run(["git", "push", "origin", default_branch], cwd=dest, capture_output=True, text=True)
-                        res_tag = subprocess.run(["git", "push", "origin", tag_name], cwd=dest, capture_output=True, text=True)
+                        subprocess.run(["git", "push", "origin", default_branch], cwd=dest, capture_output=True, text=True)
+                        subprocess.run(["git", "push", "origin", tag_name], cwd=dest, capture_output=True, text=True)
 
-                        if res_main.returncode == 0 and res_tag.returncode == 0:
-                            print(f"  ✓ Pushed release successfully.")
-                        else:
-                            print(f"  ! Failed to push release.")
-
-                # 5. DROP FEATURE
                 if args.drop_feature:
-                    if current_branch == default_branch or current_branch.startswith("dev-"):
-                        print(f"  ! Cannot drop '{current_branch}'. Must be on an active feature branch.")
-                        continue
-
+                    if current_branch == default_branch or current_branch.startswith("dev-"): continue
                     current_version = str(item.get("version", "0.0.1")).strip()
                     parts = current_version.replace("v", "").split(".")
                     guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
                     default_dev = f"dev-v{guess_version}"
 
-                    if args.assume_yes:
-                        target_dev = default_dev
-                        print(f"  - Auto-selected integration branch: '{target_dev}'")
-                    else:
-                        ans = input(f"  > Drop '{current_branch}' and return to which dev branch? [{default_dev}]: ").strip()
-                        target_dev = ans if ans else default_dev
-
-                    check_b = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target_dev}"], cwd=dest)
-                    if check_b.returncode != 0:
-                        print(f"  ! Integration branch '{target_dev}' not found locally. Skipping.")
-                        continue
+                    target_dev = default_dev if args.assume_yes else (input(f"  > Drop '{current_branch}' and return to which dev branch? [{default_dev}]: ").strip() or default_dev)
+                    if subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target_dev}"], cwd=dest).returncode != 0: continue
 
                     if not args.assume_yes:
-                        ans_confirm = input(f"  > \033[91mWARNING: This will permanently delete '{current_branch}' and all uncommitted changes. Proceed? [y/N]:\033[0m ").strip().lower()
-                        if ans_confirm not in ("y", "yes"):
-                            print("  - Aborted dropping feature.")
-                            continue
-
-                    print(f"  - Dropping '{current_branch}' and switching to '{target_dev}'...")
+                        ans_confirm = input(f"  > \033[91mWARNING: This will permanently delete '{current_branch}'. Proceed? [y/N]:\033[0m ").strip().lower()
+                        if ans_confirm not in ("y", "yes"): continue
 
                     subprocess.run(["git", "reset", "--hard"], cwd=dest, capture_output=True)
                     subprocess.run(["git", "checkout", target_dev], cwd=dest, capture_output=True)
                     subprocess.run(["git", "branch", "-D", current_branch], cwd=dest, capture_output=True)
-
-                    print(f"  ✓ Deleted local feature branch '{current_branch}'.")
-
-                    subprocess.run(
-                        ["git", "push", "origin", "--delete", current_branch],
-                        cwd=dest,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
+                    subprocess.run(["git", "push", "origin", "--delete", current_branch], cwd=dest, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Command Failed (exit code {e.returncode})", file=sys.stderr)
@@ -714,7 +572,6 @@ def main(argv: list[str] | None = None) -> int:
             _print_text_result(res)
 
     return exit_code
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

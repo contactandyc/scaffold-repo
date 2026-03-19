@@ -29,3 +29,4 @@ template_packages:
   resources:
     - resources/**
     - scaffold-repo.yaml
+    - aliases.yaml

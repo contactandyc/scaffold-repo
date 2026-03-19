@@ -1,3 +1,4 @@
+# src/scaffold_repo/config_reader.py
 from __future__ import annotations
 
 import fnmatch
@@ -14,6 +15,7 @@ from typing import Any, Iterable
 
 import yaml
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, StrictUndefined
+from .scaffoldrc import find_scaffoldrc
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Small, self‑contained utilities (pure, no I/O side effects)
@@ -39,26 +41,21 @@ def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 def _coerce_list(x) -> list[Any]:
-    if x is None:
-        return []
-    if isinstance(x, (list, tuple)):
-        return list(x)
+    if x is None: return []
+    if isinstance(x, (list, tuple)): return list(x)
     return [x]
 
 def _dedupe(seq: Iterable[Any]) -> list[Any]:
     out, seen = [], set()
     for s in seq:
-        if s in seen:
-            continue
+        if s in seen: continue
         seen.add(s)
         out.append(s)
     return out
 
 def _deep_merge(a, b):
-    if isinstance(a, list) and isinstance(b, list):
-        return _dedupe(a + b)
-    if not isinstance(a, dict) or not isinstance(b, dict):
-        return b if b is not None else a
+    if isinstance(a, list) and isinstance(b, list): return _dedupe(a + b)
+    if not isinstance(a, dict) or not isinstance(b, dict): return b if b is not None else a
     out = dict(a)
     for k, v in b.items():
         out[k] = _deep_merge(out.get(k), v)
@@ -66,17 +63,14 @@ def _deep_merge(a, b):
 
 def _ensure_trailing_newline(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    if not s.endswith("\n"):
-        return s + "\n"
+    if not s.endswith("\n"): return s + "\n"
     return s
 
 def _diff(old: bytes, new: bytes, path: str) -> str:
     import difflib
     old_lines = old.decode("utf-8", errors="replace").splitlines(keepends=True)
     new_lines = new.decode("utf-8", errors="replace").splitlines(keepends=True)
-    return "".join(
-        difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}")
-    )
+    return "".join(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}"))
 
 _OSS_HEADER_EXTS = {
     ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts",
@@ -113,27 +107,21 @@ def _strip_spdx_for_compare(path: Path, text: str) -> str:
     i = 1 if (lines and lines[0].startswith("#!")) else 0
     n = len(lines)
 
-    def _is_blank(s: str) -> bool:
-        return not s.strip()
+    def _is_blank(s: str) -> bool: return not s.strip()
 
     if style["mode"] == _LINE:
         pref = style["prefix"]
         start = i
         j = start
-        while j < n and (_is_blank(lines[j]) or lines[j].lstrip().startswith(pref)):
-            j += 1
+        while j < n and (_is_blank(lines[j]) or lines[j].lstrip().startswith(pref)): j += 1
         top = lines[start:j]
-        if not top:
-            return text
+        if not top: return text
         spdx_idxs = [k for k, ln in enumerate(top) if "SPDX-" in ln]
-        if not spdx_idxs:
-            return text
+        if not spdx_idxs: return text
         last = spdx_idxs[-1]
         k = last + 1
-        while k < len(top) and (not _is_blank(top[k])) and top[k].lstrip().startswith(pref):
-            k += 1
-        if k < len(top) and _is_blank(top[k]):
-            k += 1
+        while k < len(top) and (not _is_blank(top[k])) and top[k].lstrip().startswith(pref): k += 1
+        if k < len(top) and _is_blank(top[k]): k += 1
         end = start + k
         return "\n".join(lines[:start] + lines[end:])
     else:
@@ -141,14 +129,12 @@ def _strip_spdx_for_compare(path: Path, text: str) -> str:
         start = i
         if start < n and lines[start].strip().startswith(open_):
             j = start + 1
-            while j < n and not lines[j].strip().endswith(close_):
-                j += 1
+            while j < n and not lines[j].strip().endswith(close_): j += 1
             j = min(j + 1, n)
             block = lines[start:j]
             if any("SPDX-" in ln for ln in block):
                 end = j
-                if end < n and not lines[end].strip():
-                    end += 1
+                if end < n and not lines[end].strip(): end += 1
                 return "\n".join(lines[:start] + lines[end:])
     return text
 
@@ -190,32 +176,26 @@ class TemplateSource:
                         out.append(f"{current_prefix}/{child.name}")
                     elif child.is_dir() and not child.name.startswith("."):
                         scan_node(child, f"{current_prefix}/{child.name}")
-            except Exception:
-                pass
+            except Exception: pass
 
         if self._pkg_root:
             tgt = self._pkg_root
             for part in clean_prefix.split("/"):
                 if part: tgt = tgt.joinpath(part)
-            if tgt.is_dir():
-                scan_node(tgt, clean_prefix)
+            if tgt.is_dir(): scan_node(tgt, clean_prefix)
 
         if self.fs_dir:
             tgt = self.fs_dir
             for part in clean_prefix.split("/"):
                 if part: tgt = tgt / part
-            if tgt.is_dir():
-                scan_node(tgt, clean_prefix)
+            if tgt.is_dir(): scan_node(tgt, clean_prefix)
 
         return _dedupe(out)
 
     def _load_logical_path(self, rel_path: str, seen: set[str] | None = None) -> dict:
-        if seen is None:
-            seen = set()
-
+        if seen is None: seen = set()
         rel_path = posixpath.normpath(rel_path)
-        if rel_path in seen:
-            return {}
+        if rel_path in seen: return {}
 
         seen_next = seen.copy()
         seen_next.add(rel_path)
@@ -230,9 +210,7 @@ class TemplateSource:
                 return {}
 
             includes = data.pop("includes", [])
-            if not isinstance(includes, list):
-                includes = [includes]
-
+            if not isinstance(includes, list): includes = [includes]
             root_data = data.pop("root", {}) if isinstance(data, dict) else {}
 
             rel_no_ext = posixpath.splitext(rel_path)[0]
@@ -240,39 +218,29 @@ class TemplateSource:
             if len(parts) == 2 and parts[0] in ("libraries", "apps", "licenses", "library-templates", "app-templates"):
                 folder = parts[0].replace("-", "_")
                 key = parts[1]
-                if folder not in data:
-                    data = {folder: {key: data}}
+                if folder not in data: data = {folder: {key: data}}
 
-            if root_data:
-                data = _deep_merge(root_data, data)
+            if root_data: data = _deep_merge(root_data, data)
 
             def _process_ref(ref: Any, default_folder: str = "", add_include: bool = True) -> Any:
                 if not isinstance(ref, str): return ref
-
                 is_ref = ("/" in ref) or ref.endswith((".yaml", ".yml")) or bool(default_folder)
                 if is_ref:
                     inc_path = ref if ref.endswith((".yaml", ".yml")) else f"{ref}.yaml"
                     if default_folder and not inc_path.startswith((f"{default_folder}/", "./", "../", "/")):
                         inc_path = f"{default_folder}/{inc_path}"
 
-                    # Only append to includes if explicitly allowed
-                    if add_include and inc_path not in includes:
-                        includes.append(inc_path)
+                    if add_include and inc_path not in includes: includes.append(inc_path)
 
                     ret_key = posixpath.splitext(inc_path)[0]
-                    if default_folder and ret_key.startswith(f"{default_folder}/"):
-                        ret_key = ret_key[len(default_folder)+1:]
-                    elif default_folder == "library-templates" and ret_key.startswith("library_templates/"):
-                        ret_key = ret_key[len("library_templates/"):]
-                    elif default_folder == "app-templates" and ret_key.startswith("app_templates/"):
-                        ret_key = ret_key[len("app_templates/"):]
+                    if default_folder and ret_key.startswith(f"{default_folder}/"): ret_key = ret_key[len(default_folder)+1:]
+                    elif default_folder == "library-templates" and ret_key.startswith("library_templates/"): ret_key = ret_key[len("library_templates/"):]
+                    elif default_folder == "app-templates" and ret_key.startswith("app_templates/"): ret_key = ret_key[len("app_templates/"):]
                     return ret_key
                 return ref
 
-            if "profile" in data:
-                data["profile"] = _process_ref(data["profile"], "profiles")
-            if "license_profile" in data:
-                data["license_profile"] = _process_ref(data["license_profile"], "licenses")
+            if "profile" in data: data["profile"] = _process_ref(data["profile"], "profiles")
+            if "license_profile" in data: data["license_profile"] = _process_ref(data["license_profile"], "licenses")
 
             for folder_key in ["libraries", "apps", "licenses", "library_templates", "app_templates"]:
                 raw_dict = data.get(folder_key)
@@ -282,25 +250,19 @@ class TemplateSource:
                         clean_name = str(k)
                         if isinstance(v, dict):
                             if "name" not in v: v["name"] = posixpath.basename(clean_name)
-
                             if "template" in v: v["template"] = _process_ref(v["template"], "library-templates" if folder_key=="libraries" else "app-templates")
                             if "profile" in v: v["profile"] = _process_ref(v["profile"], "profiles")
                             if "license_profile" in v: v["license_profile"] = _process_ref(v["license_profile"], "licenses")
-
-                            # Block peer library configs from merging into the global scope
                             if "depends_on" in v: v["depends_on"] = [_process_ref(d, "libraries", add_include=False) for d in _coerce_list(v["depends_on"])]
-
                             if "license_extras" in v and isinstance(v["license_extras"], dict):
                                 v["license_extras"] = {ek: _process_ref(ev, "licenses") for ek, ev in v["license_extras"].items()}
                             if "license_overrides" in v and isinstance(v["license_overrides"], dict):
                                 v["license_overrides"] = {ek: _process_ref(ev, "licenses") for ek, ev in v["license_overrides"].items()}
-
                             if "binaries" in v and isinstance(v["binaries"], list):
                                 for b in v["binaries"]:
                                     if isinstance(b, dict):
                                         for bk, bv in b.items():
                                             if isinstance(bv, dict) and "depends_on" in bv:
-                                                # Block peer library configs from merging into the global scope
                                                 bv["depends_on"] = [_process_ref(d, "libraries", add_include=False) for d in _coerce_list(bv["depends_on"])]
                         new_dict[clean_name] = v
                     data[folder_key] = new_dict
@@ -309,14 +271,9 @@ class TemplateSource:
             for inc in includes:
                 if not inc: continue
                 inc_str = str(inc)
-
-                if inc_str.startswith("/"):
-                    new_rel = posixpath.normpath(inc_str.lstrip("/"))
-                elif inc_str.startswith("./") or inc_str.startswith("../"):
-                    new_rel = posixpath.normpath(posixpath.join(posixpath.dirname(rel_path), inc_str))
-                else:
-                    new_rel = posixpath.normpath(inc_str)
-
+                if inc_str.startswith("/"): new_rel = posixpath.normpath(inc_str.lstrip("/"))
+                elif inc_str.startswith("./") or inc_str.startswith("../"): new_rel = posixpath.normpath(posixpath.join(posixpath.dirname(rel_path), inc_str))
+                else: new_rel = posixpath.normpath(inc_str)
                 inc_data = self._load_logical_path(new_rel, seen_next)
                 base = _deep_merge(base, inc_data)
 
@@ -327,22 +284,17 @@ class TemplateSource:
             try:
                 cand = self._pkg_root
                 for part in rel_path.split("/"):
-                    if part and part != ".":
-                        cand = cand.joinpath(part)
-                if cand.is_file():
-                    pkg_data = parse_and_resolve(cand)
-            except Exception:
-                pass
+                    if part and part != ".": cand = cand.joinpath(part)
+                if cand.is_file(): pkg_data = parse_and_resolve(cand)
+            except Exception: pass
 
         fs_data = {}
         if self.fs_dir:
             cand = (self.fs_dir / rel_path).resolve()
             try:
                 cand.relative_to(self.fs_dir)
-                if cand.is_file():
-                    fs_data = parse_and_resolve(cand)
-            except ValueError:
-                pass
+                if cand.is_file(): fs_data = parse_and_resolve(cand)
+            except ValueError: pass
 
         if not pkg_data and not fs_data:
             actual_basename = posixpath.basename(rel_path)
@@ -358,14 +310,11 @@ class TemplateSource:
         if self._pkg_root:
             def walk(node, prefix=""):
                 for child in node.iterdir():
-                    if child.is_dir() and not prefix and child.name in SKIP_DIRS:
-                        continue
+                    if child.is_dir() and not prefix and child.name in SKIP_DIRS: continue
                     name = child.name
                     rel = f"{prefix}{name}" if prefix else name
-                    if child.is_file():
-                        files_map[rel] = (child.read_bytes(), rel.endswith(".j2"), "pkg", child)
-                    elif child.is_dir():
-                        walk(child, rel + "/")
+                    if child.is_file(): files_map[rel] = (child.read_bytes(), rel.endswith(".j2"), "pkg", child)
+                    elif child.is_dir(): walk(child, rel + "/")
             walk(self._pkg_root)
 
         if self.fs_dir:
@@ -373,15 +322,13 @@ class TemplateSource:
                 try:
                     for entry in os.scandir(dir_path):
                         if entry.is_dir(follow_symlinks=False):
-                            if not prefix and entry.name in SKIP_DIRS:
-                                continue
+                            if not prefix and entry.name in SKIP_DIRS: continue
                             walk_fs(entry.path, f"{prefix}{entry.name}/")
                         elif entry.is_file(follow_symlinks=False):
                             rel = f"{prefix}{entry.name}"
                             with open(entry.path, "rb") as f:
                                 files_map[rel] = (f.read(), rel.endswith(".j2"), "fs", Path(entry.path))
-                except PermissionError:
-                    pass
+                except PermissionError: pass
             walk_fs(self.fs_dir)
 
         for rel, (data, is_j2, origin, _path) in files_map.items():
@@ -392,28 +339,22 @@ class TemplateSource:
 
     def read_resource_text(self, rel_path: str) -> str | None:
         for rel, data, _is_j2, _origin in self.iter_files():
-            if rel == rel_path:
-                return data.decode("utf-8", errors="replace")
+            if rel == rel_path: return data.decode("utf-8", errors="replace")
         return None
 
 _FM_RE = re.compile(r"^\s*\{#-?\s*(.*?)\s*-?#\}\s*", re.S)
 
 def _extract_annotation(text: str):
     m = _FM_RE.match(text)
-    if not m:
-        return None, text
-    try:
-        data = yaml.safe_load(m.group(1))
-    except yaml.YAMLError:
-        return None, text
+    if not m: return None, text
+    try: data = yaml.safe_load(m.group(1))
+    except yaml.YAMLError: return None, text
 
     meta = {}
     if isinstance(data, dict):
         val = data.get("scaffold-repo", data.get("scaffold_repo", data))
-        if isinstance(val, str):
-            meta = {"context": val}
-        elif isinstance(val, dict):
-            meta = dict(val)
+        if isinstance(val, str): meta = {"context": val}
+        elif isinstance(val, dict): meta = dict(val)
     elif isinstance(data, str):
         meta = {"context": data}
     return (meta or None), text[m.end():]
@@ -431,6 +372,21 @@ class PlanItem:
     header_managed: bool = True
     executable: bool = False
 
+def _extract_dep_name(raw_dep: Any) -> str:
+    """Helper to extract the base name from a URL or expanded dependency dict."""
+    if isinstance(raw_dep, dict):
+        if len(raw_dep) == 1:
+            k = next(iter(raw_dep))
+            if k.startswith(("http://", "https://", "git@")): raw_dep = k
+        if isinstance(raw_dep, dict):
+            raw_dep = raw_dep.get("url") or raw_dep.get("source") or ""
+    s = str(raw_dep).strip()
+    if "+" in s and "://" not in s.split("+", 1)[0]: s = s.split("+", 1)[1]
+    if "@" in s: s = s.rsplit("@", 1)[0]
+    if s.startswith(("http://", "https://", "git@")): return s.split("/")[-1].replace(".git", "")
+    return s
+
+
 class ConfigReader:
     def __init__(self, repo: Path, *, project_name: str | None = None, templates_dir: str | None = None):
         self.repo = repo.resolve()
@@ -440,11 +396,9 @@ class ConfigReader:
         fs_dir = None
         if templates_dir:
             fs_dir = Path(templates_dir)
-            if not fs_dir.is_absolute():
-                fs_dir = (self.repo / fs_dir)
+            if not fs_dir.is_absolute(): fs_dir = (self.repo / fs_dir)
             fs_dir = fs_dir.resolve()
-            if not fs_dir.is_dir():
-                raise FileNotFoundError(f"templates_dir not found: {fs_dir}")
+            if not fs_dir.is_dir(): raise FileNotFoundError(f"templates_dir not found: {fs_dir}")
 
         self.tmpl_src = TemplateSource(fs_dir=fs_dir, pkg_rel=None if fs_dir else "templates")
         self.enabled_packages: set[str] = set()
@@ -452,6 +406,10 @@ class ConfigReader:
 
     def load(self) -> None:
         self.cfg = self.tmpl_src.load_defaults_yaml() or {}
+
+        rc_cfg = find_scaffoldrc(self.repo)
+        if rc_cfg.get("workspace_dir"):
+            self.cfg["workspace_dir"] = rc_cfg["workspace_dir"]
 
         for f in self.tmpl_src.find_registry_yamls("libraries"):
             data = self.tmpl_src._load_logical_path(f)
@@ -466,6 +424,54 @@ class ConfigReader:
                 self.cfg["apps"] = _deep_merge(self.cfg["apps"], data["apps"])
 
         self._select_project()
+
+        # --- LOCAL MANIFEST OVERRIDE ---
+        local_manifest = self.repo / "scaffold.yaml"
+        if local_manifest.exists():
+            try:
+                local_data = yaml.safe_load(local_manifest.read_text(encoding="utf-8")) or {}
+
+                # 1. Resolve template inheritance
+                tmpl_ref = local_data.get("template")
+                if tmpl_ref:
+                    tmpl_path = tmpl_ref if tmpl_ref.endswith(".yaml") else f"library-templates/{tmpl_ref}.yaml"
+                    self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(tmpl_path))
+
+                # 2. Resolve profile inheritance
+                prof_ref = local_data.get("profile")
+                if prof_ref:
+                    prof_path = prof_ref if prof_ref.endswith(".yaml") else f"profiles/{prof_ref}.yaml"
+                    self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(prof_path))
+
+                # 3. Resolve base license profile
+                lic_ref = local_data.get("license_profile")
+                if lic_ref:
+                    lic_path = lic_ref if lic_ref.endswith(".yaml") else f"licenses/{lic_ref}.yaml"
+                    self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(lic_path))
+
+                # 4. Merge the local data OVER the resolved templates/profiles
+                self.cfg = _deep_merge(self.cfg, local_data)
+
+                # 5. Fix Project Name & Inject into index
+                nm = self.project_name or local_data.get("project_name") or local_data.get("project_title") or self.repo.name
+                self.cfg["project_name"] = nm
+                self.cfg["project_slug"] = _slug(nm)
+                self.cfg["cmake_project"] = local_data.get("cmake_project") or _snake(nm) or nm
+                self.cfg["project_camel"] = local_data.get("project_camel") or _camel(nm)
+
+                self.cfg.setdefault("libraries", {})
+                lib_entry = dict(local_data)
+                lib_entry["name"] = nm
+                self.cfg["libraries"][self.cfg["project_slug"]] = lib_entry
+
+                # Fallback registry for backward compatibility with aliases like andy-curtis/a-map-reduce-library
+                profile_ns = local_data.get("profile", "").split("/")[0]
+                if profile_ns:
+                    self.cfg["libraries"][_slug(f"{profile_ns}/{nm}")] = lib_entry
+
+            except Exception as e:
+                print(f"Warning: Failed to parse local {local_manifest}:\n{e}", file=sys.stderr)
+
         self._render_contributors()
         self._normalize_keys_autofill()
         self._expand_library_templates()
@@ -473,21 +479,18 @@ class ConfigReader:
         self._compute_package_switches()
 
     @property
-    def effective_config(self) -> dict:
-        return self.cfg
+    def effective_config(self) -> dict: return self.cfg
 
     def read_resource_text(self, rel_path: str) -> str | None:
         return self.tmpl_src.read_resource_text(rel_path) if self.tmpl_src else None
 
     def _strip_package_prefix(self, rel: str) -> str:
         for pkg_name, pats in self.package_patterns.items():
-            if pkg_name == "resources":
-                continue
+            if pkg_name == "resources": continue
             for pat in pats:
                 if pat.endswith("/**"):
                     prefix = pat[:-2]
-                    if rel.startswith(prefix):
-                        return rel[len(prefix):]
+                    if rel.startswith(prefix): return rel[len(prefix):]
         return rel
 
     def plan_jinja(self, *, show_diffs: bool = False) -> list[PlanItem]:
@@ -515,9 +518,7 @@ class ConfigReader:
         for it in self._discover_copy_items():
             new_norm = _ensure_trailing_newline(it["bytes"].decode("utf-8", errors="replace"))
             new_bytes = new_norm.encode("utf-8")
-
             target = self.repo / it["dest"]
-
             old_norm = _ensure_trailing_newline(target.read_text(encoding="utf-8", errors="replace") if target.exists() else "")
             status = "create" if not target.exists() else ("update" if old_norm != new_norm else "unchanged")
             diff_text = _diff(old_norm.encode("utf-8"), new_norm.encode("utf-8"), it["dest"]) if show_diffs and status in ("create", "update") else ""
@@ -526,28 +527,22 @@ class ConfigReader:
 
     def _render_contributors(self) -> None:
         contribs = self.cfg.get("contributors") or {}
-        if not isinstance(contribs, dict) or not contribs:
-            return
+        if not isinstance(contribs, dict) or not contribs: return
         env = Environment(undefined=StrictUndefined, autoescape=False)
         def render_fields(fields: dict) -> dict:
             ctx = {**self.cfg, **fields}
             out = {}
             for k, v in fields.items():
                 if isinstance(v, str):
-                    try:
-                        out[k] = env.from_string(v).render(**ctx)
-                    except Exception:
-                        out[k] = v
-                else:
-                    out[k] = v
+                    try: out[k] = env.from_string(v).render(**ctx)
+                    except Exception: out[k] = v
+                else: out[k] = v
             return out
         self.cfg["contributors"] = {key: (render_fields(val) if isinstance(val, dict) else val) for key, val in contribs.items()}
 
     def _select_project(self) -> None:
         proj = self.project_name or self.cfg.get("project_name")
-        if not proj:
-            return
-
+        if not proj: return
         proj_str = str(proj).strip()
         proj_base = posixpath.basename(proj_str)
 
@@ -570,15 +565,11 @@ class ConfigReader:
                     if nm and (nm == proj_base or _slug(nm) == want_slug or _snake(nm) == want_snake):
                         picked = item
                         break
-            if picked:
-                break
+            if picked: break
 
-        if not picked:
-            return
-
+        if not picked: return
         self.cfg = _deep_merge(self.cfg, picked)
-        if not self.cfg.get("project_name"):
-            self.cfg["project_name"] = picked.get("name") or proj_base
+        if not self.cfg.get("project_name"): self.cfg["project_name"] = picked.get("name") or proj_base
 
     def _normalize_keys_autofill(self) -> None:
         cm = dict(self.cfg.get("cmake") or {})
@@ -605,8 +596,7 @@ class ConfigReader:
 
     def _expand_library_templates(self) -> None:
         templates = self.cfg.get("library_templates") or {}
-        if not templates:
-            return
+        if not templates: return
         env = Environment(undefined=StrictUndefined, autoescape=False)
         def to_dict(val):
             if isinstance(val, dict): return val
@@ -619,16 +609,13 @@ class ConfigReader:
 
         out = {}
         raw_libs = self.cfg.get("libraries") or {}
-
         iterable_libs = raw_libs.items() if isinstance(raw_libs, dict) else enumerate(raw_libs)
 
         for key, lib in iterable_libs:
             if not isinstance(lib, dict):
                 out[key] = lib
                 continue
-
-            if isinstance(raw_libs, dict):
-                lib["name"] = lib.get("name") or posixpath.basename(str(key))
+            if isinstance(raw_libs, dict): lib["name"] = lib.get("name") or posixpath.basename(str(key))
 
             tmpl_name = lib.get("template")
             if not tmpl_name or tmpl_name not in templates:
@@ -636,7 +623,6 @@ class ConfigReader:
                 continue
 
             merged = _deep_merge(to_dict(templates[tmpl_name]), lib)
-
             nm = str(merged.get("name") or posixpath.basename(str(key))).strip()
             derived = {
                 "slug": _slug(nm), "snake": _snake(nm), "camel": _camel(nm),
@@ -658,7 +644,6 @@ class ConfigReader:
 
     def _build_library_index(self, cfg: dict) -> dict[str, dict]:
         raw_libs = cfg.get("libraries") or {}
-
         idx: dict[str, dict] = {}
         iterable = raw_libs.items() if isinstance(raw_libs, dict) else enumerate(raw_libs)
 
@@ -677,22 +662,184 @@ class ConfigReader:
 
             idx[track_slug] = {
                 "item": item, "name": nm, "slug": track_slug, "snake": target_snake,
-                "raw_key": str(key),  # <-- Required for namespace matching
+                "raw_key": str(key),
                 "finds": finds, "pkg_configs": pkg_configs, "links": links,
                 "depends_raw": list(_coerce_list(item.get("depends_on"))),
+                "depends": []
             }
             item.setdefault("build_steps", [])
             item.setdefault("kind", "local")
 
         by_snake = {v["snake"]: k for k, v in idx.items()}
-        for k, v in idx.items():
+
+        ws_str = self.cfg.get("workspace_dir", "../repos")
+        workspace_dir = Path(ws_str).expanduser()
+        if not workspace_dir.is_absolute():
+            workspace_dir = (self.repo / workspace_dir).resolve()
+
+        # Pre-seed the index with ALL dependencies safely
+        all_explicit_deps = []
+        for v in idx.values(): all_explicit_deps.extend(v["depends_raw"])
+
+        tests_cfg = self.cfg.get("tests", {})
+        if isinstance(tests_cfg, dict):
+            all_explicit_deps.extend(_coerce_list(tests_cfg.get("depends_on", [])))
+            for t in (tests_cfg.get("targets") or []):
+                if isinstance(t, dict): # TYPE SAFETY FIX
+                    all_explicit_deps.extend(_coerce_list(t.get("depends_on", [])))
+
+        apps_cfg = self.cfg.get("apps", {})
+        if isinstance(apps_cfg, dict):
+            app_ctx = apps_cfg.get("context", {})
+            if isinstance(app_ctx, dict): # TYPE SAFETY FIX
+                all_explicit_deps.extend(_coerce_list(app_ctx.get("depends_on", [])))
+
+            for app_name, app_cfg in apps_cfg.items():
+                if isinstance(app_cfg, dict):
+                    all_explicit_deps.extend(_coerce_list(app_cfg.get("depends_on", [])))
+                    for b in (app_cfg.get("binaries") or []):
+                        if isinstance(b, dict): # TYPE SAFETY FIX
+                            all_explicit_deps.extend(_coerce_list(b.get("depends_on", [])))
+
+        def _synthesize(d_raw):
+            dep_name = _extract_dep_name(d_raw)
+            if not dep_name: return None
+            s = _slug(dep_name)
+
+            if s not in idx and _snake(dep_name) not in by_snake:
+                target_snake = _snake(dep_name)
+                url_str = d_raw.get("url") if isinstance(d_raw, dict) else (d_raw if isinstance(d_raw, str) else "")
+                clean_url = url_str.split("+", 1)[-1] if "+" in str(url_str) else str(url_str)
+                clean_url = clean_url.split("@", 1)[0]
+
+                build_steps = []
+                if clean_url.startswith(("http", "https://", "git@")):
+                    build_steps = [
+                        f"git clone --depth 1 \"{clean_url}\" \"{dep_name}\"",
+                        f"cd {dep_name}",
+                        f"./build.sh clean",
+                        f"./build.sh install",
+                        f"cd ..",
+                        f"rm -rf {dep_name}"
+                    ]
+
+                idx[s] = {
+                    "item": {"name": dep_name, "build_steps": build_steps, "kind": "git", "pkg": None},
+                    "name": dep_name, "slug": s, "snake": target_snake,
+                    "raw_key": dep_name, "finds": [f"{target_snake} CONFIG REQUIRED"],
+                    "pkg_configs": [], "links": [f"{target_snake}::{target_snake}"],
+                    "depends": [], "depends_raw": []
+                }
+                by_snake[target_snake] = s
+
+                dep_manifest = workspace_dir / dep_name / "scaffold.yaml"
+                if dep_manifest.exists():
+                    try:
+                        dep_data = yaml.safe_load(dep_manifest.read_text(encoding="utf-8")) or {}
+                        idx[s]["depends_raw"] = list(_coerce_list(dep_data.get("depends_on", [])))
+                    except Exception: pass
+            return s if s in idx else by_snake.get(_snake(dep_name))
+
+        for d in _dedupe(all_explicit_deps): _synthesize(d)
+
+        # BFS Crawler
+        to_process = list(idx.keys())
+        processed = set()
+        while to_process:
+            current_slug = to_process.pop(0)
+            if current_slug in processed: continue
+            processed.add(current_slug)
+
+            v = idx[current_slug]
             deps = []
-            for d_raw in v.pop("depends_raw", []):
-                s = _slug(str(d_raw))
-                r = s if s in idx else by_snake.get(_snake(str(d_raw)))
-                if r: deps.append(r)
-            v["depends"] = _dedupe(deps)
+            for d_raw in v.get("depends_raw", []):
+                r = _synthesize(d_raw)
+                if r:
+                    deps.append(r)
+                    to_process.append(r)
+
+            if not v.get("depends"):
+                v["depends"] = _dedupe(deps)
+
         return idx
+
+    def _augment_with_libraries_tests_apps(self) -> None:
+        idx = self._build_library_index(self.cfg)
+        if not idx: return
+        proj_slug = _slug(self.cfg.get("project_name", "") or self.cfg.get("project_slug", ""))
+        if proj_slug not in idx:
+            ps = _snake(self.cfg.get("project_name", ""))
+            proj_slug = next((s for s, v in idx.items() if v["snake"] == ps), proj_slug)
+
+        if proj_slug in idx:
+            direct = idx[proj_slug]["depends"]
+            cm = dict(self.cfg.get("cmake") or {})
+
+            if direct:
+                cm.setdefault("find_packages", _dedupe([fp for d in direct for fp in (idx[d].get("finds") or []) if fp]))
+                if not cm.get("pkg_config_deps"):
+                    cm["pkg_config_deps"] = [{"module": m, "target": t} for m, t in {mod: idx[d]["snake"] for d in direct for mod in (idx[d].get("pkg_configs") or [])}.items()]
+                cm.setdefault("link_libraries", _dedupe([lk for d in direct for lk in idx[d]["links"]]))
+                cm.setdefault("deps_for_config", _dedupe([fp.strip().split()[0] for d in direct for fp in (idx[d].get("finds") or []) if fp.strip()]))
+
+            all_roots = [proj_slug]
+
+            tests_cfg = self.cfg.get("tests") or {}
+            test_deps = []
+            if isinstance(tests_cfg, dict):
+                test_deps.extend(_coerce_list(tests_cfg.get("depends_on", [])))
+                for t in (tests_cfg.get("targets") or []):
+                    if isinstance(t, dict): # TYPE SAFETY FIX
+                        test_deps.extend(_coerce_list(t.get("depends_on", [])))
+            all_roots.extend(self._resolve_dep_names_to_lib_slugs(test_deps, idx))
+
+            apps_cfg = self.cfg.get("apps") or {}
+            if isinstance(apps_cfg, dict):
+                for app_name, app_cfg in apps_cfg.items():
+                    if app_name == "context":
+                        if isinstance(app_cfg, dict): # TYPE SAFETY FIX
+                            all_roots.extend(self._resolve_dep_names_to_lib_slugs(_coerce_list(app_cfg.get("depends_on", [])), idx))
+                        continue
+                    if isinstance(app_cfg, dict):
+                        app_deps = _coerce_list(app_cfg.get("depends_on", []))
+                        for b in (app_cfg.get("binaries") or []):
+                            if isinstance(b, dict): # TYPE SAFETY FIX
+                                app_deps.extend(_coerce_list(b.get("depends_on", [])))
+                        all_roots.extend(self._resolve_dep_names_to_lib_slugs(app_deps, idx))
+
+            all_roots = _dedupe(all_roots)
+
+            all_transitive = self._collect_transitive(idx, all_roots, exclude_roots=False)
+            if proj_slug in all_transitive:
+                all_transitive.remove(proj_slug)
+
+            cm["libraries"] = [idx[s]["item"] for s in self._toposort_subset(idx, set(all_transitive))]
+
+            apt_pkgs = []
+            for s in set(all_transitive):
+                item = idx[s]["item"]
+                if str(item.get("kind")) == "system" and item.get("pkg"):
+                    pkg = item["pkg"]
+                    apt_pkgs.extend([str(x) for x in pkg if str(x).strip()] if isinstance(pkg, (list, tuple)) else [str(pkg)])
+            cm["apt_packages"] = _dedupe([p for p in apt_pkgs if p and str(p).lower() not in ("none", "null")])
+
+            self.cfg["cmake"] = cm
+
+        self.cfg = self._augment_tests_cfg(self.cfg, idx, proj_slug)
+        self.cfg = self._normalize_apps_cfg(self.cfg, idx, proj_slug)
+
+        dev_pkgs = []
+        for pkg, constraint in (self.cfg.get("dev_packages") or {}).items() if isinstance(self.cfg.get("dev_packages"), dict) else {p: True for p in _coerce_list(self.cfg.get("dev_packages"))}.items():
+            if constraint is False or constraint is None: continue
+            elif constraint is True: dev_pkgs.append(str(pkg))
+            else: dev_pkgs.append(f"{pkg}{str(constraint).strip()}" if str(constraint).strip() and str(constraint).strip()[0] in "=<>~" else f"{pkg}={str(constraint).strip()}")
+        if dev_pkgs:
+            cm = dict(self.cfg.get("cmake") or {})
+            cm["apt_dev_packages"] = _dedupe([p for p in dev_pkgs if p.strip()])
+            self.cfg["cmake"] = cm
+        cm = dict(self.cfg.get("cmake") or {})
+        for k in ["sources", "libraries", "deps_for_config", "apt_packages", "apt_dev_packages", "find_packages", "pkg_config_deps", "link_libraries", "depends_on"]: cm.setdefault(k, [])
+        self.cfg["cmake"] = cm
 
     def _collect_transitive(self, idx: dict[str, dict], roots: Iterable[str], *, exclude_roots=False) -> list[str]:
         roots = [r for r in roots if r in idx]
@@ -702,8 +849,7 @@ class ConfigReader:
             if s in seen: continue
             seen.add(s)
             stack.extend(d for d in idx[s]["depends"] if d in idx)
-        if exclude_roots:
-            seen.difference_update(roots)
+        if exclude_roots: seen.difference_update(roots)
         return list(seen)
 
     def _toposort_subset(self, idx: dict[str, dict], subset: Iterable[str]) -> list[str]:
@@ -717,14 +863,13 @@ class ConfigReader:
         queue = [s for s in S if indeg[s] == 0]
         ordered = []
         while queue:
-            n = sorted(queue, key=lambda x: idx[x]["name"].lower()).pop(0)
-            queue.remove(n)
+            queue.sort(key=lambda x: idx[x]["name"].lower())
+            n = queue.pop(0)
             ordered.append(n)
             for m in adj[n]:
                 indeg[m] -= 1
                 if indeg[m] == 0: queue.append(m)
-        if len(ordered) != len(S):
-            ordered.extend(sorted([s for s in S if s not in ordered], key=lambda x: idx[x]["name"].lower()))
+        if len(ordered) != len(S): ordered.extend(sorted([s for s in S if s not in ordered], key=lambda x: idx[x]["name"].lower()))
         return ordered
 
     def _gather_apt_packages(self, cfg: dict, idx: dict[str, dict], proj_slug: str) -> list[str]:
@@ -738,54 +883,35 @@ class ConfigReader:
         return _dedupe([p for p in pkgs if p and str(p).lower() not in ("none", "null")])
 
     def _normalize_build_targets(self, raw_items: Any, abs_dest_dir: Path, default_src_dir: str = "") -> list[dict]:
-        if not raw_items:
-            return []
-
+        if not raw_items: return []
         b_dict = {}
         if isinstance(raw_items, list):
             for item in raw_items:
-                if isinstance(item, str) and item.strip():
-                    name = item.strip()
-                    b_dict[name] = {"sources": [f"{default_src_dir}/{name}.c" if default_src_dir else f"{name}.c"]}
+                if isinstance(item, str) and item.strip(): b_dict[item.strip()] = {"sources": [f"{default_src_dir}/{item.strip()}.c" if default_src_dir else f"{item.strip()}.c"]}
                 elif isinstance(item, dict) and item:
-                    if "name" in item:
-                        name = str(item.pop("name")).strip()
-                        b_dict[name] = item
+                    if "name" in item: b_dict[str(item.pop("name")).strip()] = item
                     else:
                         k = next(iter(item.keys()))
                         v = item[k]
-                        if isinstance(v, list):
-                            b_dict[str(k).strip()] = {"sources": v}
-                        elif isinstance(v, str):
-                            b_dict[str(k).strip()] = {"sources": [v]}
-                        elif isinstance(v, dict):
-                            b_dict[str(k).strip()] = v
+                        if isinstance(v, list): b_dict[str(k).strip()] = {"sources": v}
+                        elif isinstance(v, str): b_dict[str(k).strip()] = {"sources": [v]}
+                        elif isinstance(v, dict): b_dict[str(k).strip()] = v
         elif isinstance(raw_items, dict):
             for k, v in raw_items.items():
-                if isinstance(v, list):
-                    b_dict[str(k).strip()] = {"sources": v}
-                elif isinstance(v, str):
-                    b_dict[str(k).strip()] = {"sources": [v]}
-                elif isinstance(v, dict):
-                    b_dict[str(k).strip()] = v
-                elif v is None:
-                    b_dict[str(k).strip()] = {"sources": [f"{default_src_dir}/{k}.c" if default_src_dir else f"{k}.c"]}
-        else:
-            name = str(raw_items).strip()
-            b_dict[name] = {"sources": [f"{default_src_dir}/{name}.c" if default_src_dir else f"{name}.c"]}
+                if isinstance(v, list): b_dict[str(k).strip()] = {"sources": v}
+                elif isinstance(v, str): b_dict[str(k).strip()] = {"sources": [v]}
+                elif isinstance(v, dict): b_dict[str(k).strip()] = v
+                elif v is None: b_dict[str(k).strip()] = {"sources": [f"{default_src_dir}/{k}.c" if default_src_dir else f"{k}.c"]}
+        else: b_dict[str(raw_items).strip()] = {"sources": [f"{default_src_dir}/{str(raw_items).strip()}.c" if default_src_dir else f"{str(raw_items).strip()}.c"]}
 
         norm = []
         for name, conf in b_dict.items():
             if not name: continue
-
             raw_sources = _coerce_list(conf.get("sources") or [f"{default_src_dir}/{name}.c" if default_src_dir else f"{name}.c"])
-            expanded_sources = []
-            include_dirs = set()
-
+            expanded_sources, include_dirs = [], set()
             for src in raw_sources:
                 src_str = str(src).strip()
                 if "*" in src_str or "?" in src_str:
-                    # Globbing is handled safely across OS and directories
                     if abs_dest_dir.exists():
                         search_path = abs_dest_dir / src_str
                         matches = glob.glob(str(search_path), recursive=True)
@@ -804,19 +930,12 @@ class ConfigReader:
                 else:
                     expanded_sources.append(src_str)
                     include_dirs.add(posixpath.dirname(src_str) or ".")
-
-            ent = {
-                "name": name,
-                "sources": _dedupe(expanded_sources),
-                "include_dirs": sorted(list(include_dirs))
-            }
+            ent = {"name": name, "sources": _dedupe(expanded_sources), "include_dirs": sorted(list(include_dirs))}
             for f in ("link_libraries", "depends_on", "find_packages"):
                 if conf.get(f) is not None: ent[f] = [str(x) for x in _coerce_list(conf[f])]
             for f in ("c_standard", "cxx_standard"):
                 if f in conf: ent[f] = conf[f]
-
             norm.append(ent)
-
         return sorted(norm, key=lambda x: x["name"])
 
     def _resolve_dep_names_to_lib_slugs(self, dep_names: list[str], idx: dict) -> list[str]:
@@ -824,9 +943,10 @@ class ConfigReader:
         out = []
         for nm in dep_names or []:
             if not nm: continue
-            s = _slug(str(nm))
+            clean_nm = _extract_dep_name(nm)
+            s = _slug(clean_nm)
             if s in idx: out.append(s)
-            elif _snake(str(nm)) in by_snake: out.append(by_snake[_snake(str(nm))])
+            elif _snake(clean_nm) in by_snake: out.append(by_snake[_snake(clean_nm)])
         return _dedupe(out)
 
     def _derive_suite_deps_from_libs(self, lib_slugs: list[str], idx: dict) -> tuple[list[str], list[str]]:
@@ -834,14 +954,8 @@ class ConfigReader:
 
     def _augment_tests_cfg(self, cfg: dict, idx: dict, proj_slug: str) -> dict:
         ts = dict(cfg.get("tests") or {})
-        raw_targets = ts.get("targets") or ts.get("test_targets")
-
-        abs_test_dir = self.repo / "tests"
-        norm_targets = self._normalize_build_targets(raw_targets, abs_test_dir, "src")
-
-        if norm_targets:
-            ts["targets"] = ts["test_targets"] = norm_targets
-
+        norm_targets = self._normalize_build_targets(ts.get("targets") or ts.get("test_targets"), self.repo / "tests", "src")
+        if norm_targets: ts["targets"] = ts["test_targets"] = norm_targets
         union_deps = [str(x) for x in _coerce_list(ts.get("depends_on"))]
         for t in (norm_targets or []): union_deps.extend(str(nm) for nm in t.get("depends_on") or [])
         lib_slugs = self._resolve_dep_names_to_lib_slugs(union_deps, idx)
@@ -853,7 +967,6 @@ class ConfigReader:
             else:
                 ext_finds.extend(idx[s].get("finds", []))
                 ext_links.extend(idx[s].get("links", []))
-
         ts.setdefault("find_packages", _dedupe(ext_finds))
         ts.setdefault("link_libraries", _dedupe(in_links + ext_links))
         cfg["tests"] = ts
@@ -875,100 +988,36 @@ class ConfigReader:
             if name == "context": continue
             ctx = _deep_merge(base_ctx_wo_dest, dict(v or {}))
             ctx["_apps_dest_dir"] = self._compute_app_dest_dir(base_dest, ctx.get("dest"), str(name))
-
-            abs_app_dir = self.repo / ctx["_apps_dest_dir"]
-            ctx["binaries"] = self._normalize_build_targets(ctx.get("binaries"), abs_app_dir, "src")
-
+            ctx["binaries"] = self._normalize_build_targets(ctx.get("binaries"), self.repo / ctx["_apps_dest_dir"], "src")
             union_deps = [str(x) for x in _coerce_list(base_ctx_wo_dest.get("depends_on")) + _coerce_list(ctx.get("depends_on"))]
             for b in ctx["binaries"]: union_deps.extend(str(nm) for nm in b.get("depends_on") or [])
             if not union_deps and proj_slug: union_deps.append(proj_slug)
-
             lib_slugs = self._resolve_dep_names_to_lib_slugs(_dedupe(union_deps), idx)
             if lib_slugs:
                 finds, links = self._derive_suite_deps_from_libs(lib_slugs, idx)
                 ctx.setdefault("find_packages", finds)
                 ctx.setdefault("link_libraries", links)
             out[str(name)] = ctx
-
         apps.update(out)
         cfg["apps"] = apps
         return cfg
 
-    def _augment_with_libraries_tests_apps(self) -> None:
-        cfg = self.cfg
-        idx = self._build_library_index(cfg)
-        if not idx:
-            return
-
-        proj_slug = _slug(cfg.get("project_name", "") or cfg.get("project_slug", ""))
-        if proj_slug not in idx:
-            ps = _snake(cfg.get("project_name", ""))
-            proj_slug = next((s for s, v in idx.items() if v["snake"] == ps), proj_slug)
-
-        if proj_slug in idx:
-            direct = idx[proj_slug]["depends"]
-            cm = dict(cfg.get("cmake") or {})
-            if direct:
-                cm.setdefault("find_packages", _dedupe([fp for d in direct for fp in (idx[d].get("finds") or []) if fp]))
-                if not cm.get("pkg_config_deps"):
-                    pc_map = {mod: idx[d]["snake"] for d in direct for mod in (idx[d].get("pkg_configs") or [])}
-                    cm["pkg_config_deps"] = [{"module": m, "target": t} for m, t in pc_map.items()]
-                cm.setdefault("link_libraries", _dedupe([lk for d in direct for lk in idx[d]["links"]]))
-                cm.setdefault("deps_for_config", _dedupe([fp.strip().split()[0] for d in direct for fp in (idx[d].get("finds") or []) if fp.strip()]))
-
-                order = self._toposort_subset(idx, set(self._collect_transitive(idx, [proj_slug], exclude_roots=True)))
-                cm["libraries"] = [idx[s]["item"] for s in order]
-                cm["apt_packages"] = self._gather_apt_packages(cfg, idx, proj_slug)
-                self.cfg["cmake"] = cm
-
-        self.cfg = self._augment_tests_cfg(self.cfg, idx, proj_slug)
-        self.cfg = self._normalize_apps_cfg(self.cfg, idx, proj_slug)
-
-        raw_dev = self.cfg.get("dev_packages") or {}
-        dev_pkgs = []
-        if isinstance(raw_dev, dict):
-            for pkg, constraint in raw_dev.items():
-                if constraint is False or constraint is None: continue
-                elif constraint is True: dev_pkgs.append(str(pkg))
-                else:
-                    val = str(constraint).strip()
-                    dev_pkgs.append(f"{pkg}{val}" if val and val[0] in "=<>~" else f"{pkg}={val}")
-        else:
-            dev_pkgs = _coerce_list(raw_dev)
-
-        if dev_pkgs:
-            cm = dict(self.cfg.get("cmake") or {})
-            cm["apt_dev_packages"] = _dedupe([p for p in dev_pkgs if p.strip()])
-            self.cfg["cmake"] = cm
-
-        cm = dict(self.cfg.get("cmake") or {})
-        for k in ["sources", "libraries", "deps_for_config", "apt_packages", "apt_dev_packages", "find_packages", "pkg_config_deps", "link_libraries", "depends_on"]:
-            cm.setdefault(k, [])
-        self.cfg["cmake"] = cm
-
     def _compute_package_switches(self) -> None:
-        merged = self.cfg.get("template_packages") or {}
-
         env = Environment(undefined=StrictUndefined)
         def render_pat(p):
             if "{{" in p:
                 try: return env.from_string(p).render(**self.cfg)
                 except Exception: return p
             return p
-
-        self.package_patterns = {name: [render_pat(str(x)) for x in _coerce_list(pats)] for name, pats in merged.items()}
-
+        self.package_patterns = {name: [render_pat(str(x)) for x in _coerce_list(pats)] for name, pats in (self.cfg.get("template_packages") or {}).items()}
         raw_pkgs = self.cfg.get("packages") or {}
         enabled, flavors = set(), {}
         if isinstance(raw_pkgs, dict):
             for pkg, val in raw_pkgs.items():
                 if val is False or val is None: continue
                 enabled.add(pkg)
-                if isinstance(val, str) and val.lower() != "true":
-                    flavors[pkg] = val
-        else:
-            enabled = set(str(x) for x in _coerce_list(raw_pkgs))
-
+                if isinstance(val, str) and val.lower() != "true": flavors[pkg] = val
+        else: enabled = set(str(x) for x in _coerce_list(raw_pkgs))
         self.enabled_packages = enabled
         self.cfg["package_flavors"] = flavors
 
@@ -979,63 +1028,24 @@ class ConfigReader:
     def _discover_jinja_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if not is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/"):
-                continue
-
+            if not is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/"): continue
             text = data.decode("utf-8", errors="replace")
             meta, inline_template = _extract_annotation(text)
-            meta = meta or {}
-
-            sub_rel = self._strip_package_prefix(rel)
-            dest = meta.get("dest") or sub_rel[:-3]
-
-            # Skip generating test scaffolding if there are no test targets
-            test_tgts = (self.cfg.get("tests") or {}).get("targets") or []
-            if dest.startswith("tests/") and not test_tgts:
-                continue
-
-            context_key = meta.get("context", ".")
-            updatable = bool(meta.get("updatable", True))
-            header_managed = meta.get("header_managed")
-
+            dest = (meta or {}).get("dest") or self._strip_package_prefix(rel)[:-3]
+            if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
             executable = False
-            if origin == "fs" and self.tmpl_src.fs_dir:
-                src_path = self.tmpl_src.fs_dir / rel
-                if src_path.exists():
-                    executable = os.access(src_path, os.X_OK)
-
-            items.append({
-                "rel": rel,
-                "inline_template": inline_template,
-                "dest": dest,
-                "context": context_key,
-                "updatable": updatable,
-                "header_managed": header_managed,
-                "origin": origin,
-                "executable": executable
-            })
+            if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): executable = os.access(src_path, os.X_OK)
+            items.append({"rel": rel, "inline_template": inline_template, "dest": dest, "context": (meta or {}).get("context", "."), "updatable": bool((meta or {}).get("updatable", True)), "header_managed": (meta or {}).get("header_managed"), "origin": origin, "executable": executable})
         return items
 
     def _discover_copy_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/"):
-                continue
-
-            if rel == ".scaffold-defaults.yaml":
-                continue
-
+            if is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or rel == ".scaffold-defaults.yaml": continue
             dest = self._strip_package_prefix(rel)
-
-            # Skip generating test scaffolding if there are no test targets
-            test_tgts = (self.cfg.get("tests") or {}).get("targets") or []
-            if dest.startswith("tests/") and not test_tgts:
-                continue
-
+            if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
             executable = False
-            if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists():
-                executable = os.access(src_path, os.X_OK)
-
+            if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): executable = os.access(src_path, os.X_OK)
             items.append({"rel": rel, "dest": dest, "bytes": data, "origin": origin, "executable": executable})
         return items
 
@@ -1054,7 +1064,7 @@ class ConfigReader:
                 lines = it["inline_template"].splitlines()
                 start, end = max(0, lineno - 3), min(len(lines), lineno + 2)
                 frame = "\n--- snippet around line {} ---\n{}\n".format(lineno, "\n".join(f"{i+1:5d}| {lines[i]}{'  <-- here' if (i + 1) == lineno else ''}" for i in range(start, end)))
-            raise RuntimeError(f"Jinja render error in template '{it['rel']}' → output '{it['dest']}' (context='{it['context']}'):\n{e}\n{frame}") from e
+            raise RuntimeError(f"Jinja render error in template '{it['rel']}' → output '{it['dest']}':\n{e}\n{frame}") from e
 
     def _base_from_cfg(self, cfg: dict) -> dict:
         return {k: v for k, v in cfg.items() if k not in ("cmake", "tests", "files", "template_packages", "packages", "templates_dir")}
@@ -1076,25 +1086,16 @@ class ConfigReader:
         apps = self.cfg.get("apps") or {}
         contexts = [k for k in apps.keys() if k != "context"]
         if not contexts: return []
-
-        all_app_resources = []
-        for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if rel.startswith("app-resources/") and not rel.endswith("/"):
-                all_app_resources.append((rel, data, is_j2, origin))
-
+        all_app_resources = [(rel, data, is_j2, origin) for rel, data, is_j2, origin in self.tmpl_src.iter_files() if rel.startswith("app-resources/") and not rel.endswith("/")]
         if not all_app_resources: return []
 
         env, plan, base = self._jinja_env_for_inline(), [], self._build_ctx_inherited("cmake")
-
         for ctx_name in contexts:
             ctx = dict(apps.get(ctx_name) or {})
             dest_dir = ctx.get("_apps_dest_dir") or self._compute_app_dest_dir(str((apps.get("context") or {}).get("dest") or "apps"), ctx.get("dest"), ctx_name)
             rctx = _deep_merge(base, ctx)
-
             app_flavor = ctx.get("flavor") or ctx.get("app_flavor") or self.cfg.get("repo_flavor")
-
-            active_prefix = f"app-resources/{app_flavor}/" if app_flavor else None
-            global_prefix = "app-resources/global/"
+            active_prefix, global_prefix = f"app-resources/{app_flavor}/" if app_flavor else None, "app-resources/global/"
 
             rctx.setdefault("project_name", self.cfg.get("project_name") or "project")
             rctx.setdefault("project_slug", _slug(rctx["project_name"]))
@@ -1104,15 +1105,8 @@ class ConfigReader:
             rctx.setdefault("app_languages", base.get("language", "C"))
 
             for rel, data, is_j2, origin in all_app_resources:
-                root_prefix = None
-                if active_prefix and rel.startswith(active_prefix):
-                    root_prefix = active_prefix
-                elif rel.startswith(global_prefix):
-                    root_prefix = global_prefix
-
-                if not root_prefix:
-                    continue
-
+                root_prefix = active_prefix if active_prefix and rel.startswith(active_prefix) else (global_prefix if rel.startswith(global_prefix) else None)
+                if not root_prefix: continue
                 sub_rel = rel[len(root_prefix):]
                 dest_rel = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
                 target = self.repo / dest_rel
@@ -1122,18 +1116,14 @@ class ConfigReader:
                     try: new_bytes = env.from_string(raw_tpl).render(**rctx).encode("utf-8")
                     except Exception as e: raise RuntimeError(f"Jinja render error in apps resource '{rel}' → '{dest_rel}': {e}") from e
                     tmpl_sha = _sha256(raw_tpl.encode("utf-8"))
-                else:
-                    new_bytes, tmpl_sha = data, _sha256(data)
+                else: new_bytes, tmpl_sha = data, _sha256(data)
 
                 old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
                 hm = _header_managed_default(dest_rel)
                 cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
                 status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
                 diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
-
                 is_exec = False
-                if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists():
-                    is_exec = os.access(src_path, os.X_OK)
-
+                if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): is_exec = os.access(src_path, os.X_OK)
                 plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, True, diff_text, new_bytes, tmpl_sha, f"apps.{ctx_name}", hm, is_exec))
         return plan
