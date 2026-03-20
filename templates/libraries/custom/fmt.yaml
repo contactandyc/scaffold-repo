@@ -1,11 +1,10 @@
 kind: git
 url: https://github.com/contactandyc/restinio.git
-dir: restinio/fmt
+branch: v.0.7.3-fork
+shallow: true
 build_steps:
-  - git clone --depth 1 "https://github.com/contactandyc/restinio.git" "restinio"
-  - mkdir -p build/fmt && cd build/fmt
-  - cmake ../../restinio/fmt
-  - make -j"$(nproc)" && sudo make install
-  - cd ../.. && rm -rf restinio
+  - cmake -S fmt -B fmt/build -DCMAKE_INSTALL_PREFIX=/usr/local
+  - cmake --build fmt/build -j"$(nproc)"
+  - sudo cmake --install fmt/build
 find_package: "fmt REQUIRED"
 link: "fmt::fmt"

@@ -32,6 +32,9 @@ def _auto_clone_target(dest: Path, item: dict, global_cfg: dict, skip_sync: bool
         return
 
     url = item.get("url")
+    branch = item.get("branch")
+    shallow = item.get("shallow")
+
     if not url:
         gh_proj = global_cfg.get("github_project")
         name = item.get("name") or dest.name
@@ -39,13 +42,24 @@ def _auto_clone_target(dest: Path, item: dict, global_cfg: dict, skip_sync: bool
             url = f"https://github.com/{gh_proj}/{name}.git"
 
     if url:
-        print(f"  [Auto-Clone] Attempting to clone {url}...")
-        res = subprocess.run(["git", "clone", url, str(dest)], capture_output=True, text=True)
+        clone_cmd = ["git", "clone"]
+        if shallow:
+            clone_cmd.extend(["--depth", "1"])
+        if branch:
+            clone_cmd.extend(["--branch", branch, "--single-branch"])
+        clone_cmd.extend([url, str(dest)])
+
+        import shlex
+        cmd_str = " ".join(shlex.quote(c) for c in clone_cmd)
+        print(f"  [Auto-Clone] Executing: $ {cmd_str}")
+
+        res = subprocess.run(clone_cmd, capture_output=True, text=True)
         if res.returncode == 0:
             print(f"  [Auto-Clone] Successfully cloned {url}.")
             return
         else:
-            print(f"  [Auto-Clone] Clone failed. Initializing empty repo.")
+            print(f"  \033[91m[Auto-Clone] Clone failed. Error: {res.stderr.strip()}\033[0m")
+            print(f"  [Auto-Clone] Initializing empty repo instead.")
     else:
         print("  [Auto-Clone] No URL defined. Initializing empty repo.")
 
@@ -235,8 +249,7 @@ def main(argv: list[str] | None = None) -> int:
 
     grp_dp = ap.add_argument_group("Dependency Lifecycle")
     grp_dp.add_argument("--clone-deps", action="store_true", help="Fetch external dependencies")
-    grp_dp.add_argument("--build-deps", action="store_true", help="Fetch and compile external dependencies")
-    grp_dp.add_argument("--install-deps", action="store_true", help="Fetch, compile, and install dependencies")
+    grp_dp.add_argument("--build-deps", action="store_true", help="Fetch, compile, and install dependencies")
 
     grp_tl = ap.add_argument_group("Target Lifecycle")
     grp_tl.add_argument("--build", action="store_true", help="Run './build.sh build'")
@@ -366,14 +379,43 @@ def main(argv: list[str] | None = None) -> int:
                     res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
                     default_branch = "main" if "main" in res_main.stdout else "master"
 
-                    if current_branch == default_branch or current_branch.startswith("dev-"):
-                        scaffold_branch = "chore/update-scaffolding"
-                        print(f"  - Protected branch '{current_branch}' detected. Moving to '{scaffold_branch}'.")
+                    scaffold_branch = "chore/update-scaffolding"
+
+                    if current_branch == default_branch:
+                        # 1. Calculate the next dev branch from local scaffold.yaml
+                        current_version = str(item.get("version", "0.0.1")).strip()
+                        parts = current_version.replace("v", "").split(".")
+                        guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
+                        target_dev = f"dev-v{guess_version}"
+
+                        print(f"  - On '{default_branch}'. Establishing integration branch '{target_dev}'...")
+
+                        # 2. Ensure dev branch exists
+                        check_dev = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target_dev}"], cwd=dest)
+                        if check_dev.returncode != 0:
+                            subprocess.run(["git", "branch", target_dev, default_branch], cwd=dest, capture_output=True)
+
+                        # 3. Check out the dev branch so the feature branch stems from it
+                        subprocess.run(["git", "checkout", target_dev], cwd=dest, capture_output=True)
+
+                        print(f"  - Moving to '{scaffold_branch}' from '{target_dev}'.")
                         check_feat = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{scaffold_branch}"], cwd=dest)
                         if check_feat.returncode == 0:
                             subprocess.run(["git", "checkout", scaffold_branch], cwd=dest, capture_output=True)
                         else:
                             subprocess.run(["git", "checkout", "-b", scaffold_branch], cwd=dest, capture_output=True)
+
+                    elif current_branch.startswith("dev-"):
+                        print(f"  - Protected integration branch '{current_branch}' detected. Moving to '{scaffold_branch}'.")
+                        check_feat = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{scaffold_branch}"], cwd=dest)
+                        if check_feat.returncode == 0:
+                            subprocess.run(["git", "checkout", scaffold_branch], cwd=dest, capture_output=True)
+                        else:
+                            subprocess.run(["git", "checkout", "-b", scaffold_branch], cwd=dest, capture_output=True)
+
+                    elif current_branch == scaffold_branch:
+                        print(f"  - Already on '{scaffold_branch}'. Applying updates.")
+
                     else:
                         print(f"  - Already on working branch '{current_branch}'. Applying updates directly.")
 
@@ -408,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 exit_code = max(exit_code, code)
                 results.append(res)
-        elif not project_tokens: # <--- SAFETY RAIL: Only scaffold in-place if no projects were explicitly requested
+        elif not project_tokens:
             print(f"\n\033[95m=== Scaffolding in-place ({root}) ===\033[0m")
             if not skip_templates:
                 code, res = verify_repo(
@@ -420,24 +462,27 @@ def main(argv: list[str] | None = None) -> int:
                 results.append(res)
 
         # --- PHASE 4: Build Dependencies ---
-        if args.build_deps or args.install_deps:
+        if args.build_deps:
             for t_dir in target_dirs:
                 if t_dir.exists():
                     build_all_libs(
                         repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
                         templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
-                        do_clone=False, do_build=args.build_deps, do_install=args.install_deps
+                        do_clone=False, do_build=args.build_deps, do_install=args.build_deps
                     )
 
         # --- PHASE 5: First-Party Build Orchestration ---
         if targets and (args.build or args.install):
             print("\n\033[1m=== Phase 5: First-Party Build Orchestration ===\033[0m")
+            from .build_libs import execute_build
+
             for name, slug, raw_token, item in targets:
                 dest = workspace_dir / _slug(posixpath.basename(raw_token))
                 if not dest.exists(): continue
-                cmd = "install" if args.install else "build"
-                print(f"\n🚀 Running './build.sh {cmd}' for {name}...")
-                subprocess.run(["./build.sh", cmd], cwd=dest, check=True)
+
+                print(f"\n🚀 Orchestrating build for {name}...")
+                # We pass do_install=True if args.install was passed, otherwise False (just build)
+                execute_build(slug, dest, item, workspace_dir, do_install=args.install)
 
         # --- PHASE 6: Git Orchestration ---
         if targets and (args.commit or args.publish_feature or args.publish_release or args.drop_feature or args.push):
@@ -447,6 +492,8 @@ def main(argv: list[str] | None = None) -> int:
                 if not (dest / ".git").exists(): continue
 
                 print(f"\n📦 Syncing {name} to Git...")
+
+                # Refresh branch context right before orchestrating
                 res = subprocess.run(["git", "branch", "--show-current"], cwd=dest, capture_output=True, text=True)
                 current_branch = res.stdout.strip()
                 res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
@@ -457,13 +504,13 @@ def main(argv: list[str] | None = None) -> int:
                 is_dirty = bool(status.stdout.strip())
 
                 # --- THE GITOPS AUTO-COMMIT ---
-                if args.publish_feature and current_branch == "chore/update-scaffolding" and is_dirty:
+                if (args.publish_feature or args.commit) and current_branch == "chore/update-scaffolding" and is_dirty:
                     print(f"  [Auto-Commit] Committing scaffolding updates on '{current_branch}' before publishing...")
                     subprocess.run(["git", "add", "-A"], cwd=dest, check=True)
-                    subprocess.run(["git", "commit", "-m", "chore: apply scaffolding updates"], cwd=dest, check=True)
+                    subprocess.run(["git", "commit", "-m", args.commit if args.commit else "chore: apply scaffolding updates"], cwd=dest, check=True)
                     is_dirty = False # Tree is now clean and ready to publish
 
-                if args.commit:
+                if args.commit and current_branch != "chore/update-scaffolding":
                     if current_branch == default_branch or current_branch.startswith("dev-"):
                         print(f"  ! Cannot commit directly to '{current_branch}'. Start a feature branch first.")
                     elif is_dirty:
@@ -489,24 +536,67 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"  \033[91m❌ Blocked: Cannot publish '{name}' because it has uncommitted changes on '{current_branch}'.\033[0m")
                         continue
 
-                    current_version = str(item.get("version", "0.0.1")).strip()
-                    parts = current_version.replace("v", "").split(".")
-                    guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
-                    default_dev = f"dev-v{guess_version}"
+                    # --- SMART PARENT DETECTION ---
+                    res_all = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=dest, capture_output=True, text=True)
+                    all_branches = [b.strip() for b in res_all.stdout.splitlines() if b.strip()]
 
-                    target_dev = default_dev if args.assume_yes else (input(f"  > Merge '{current_branch}' into which dev branch? [{default_dev}]: ").strip() or default_dev)
-                    if subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target_dev}"], cwd=dest).returncode != 0: continue
+                    dev_branches = sorted([b for b in all_branches if b.startswith("dev-")], reverse=True)
 
-                    print(f"  - Merging '{current_branch}' into '{target_dev}'...")
+                    target_dev = None
+                    if dev_branches:
+                        min_distance = float('inf')
+                        for cand in dev_branches:
+                            mb_res = subprocess.run(["git", "merge-base", current_branch, cand], cwd=dest, capture_output=True, text=True)
+                            if mb_res.returncode == 0:
+                                mb = mb_res.stdout.strip()
+                                dist_res = subprocess.run(["git", "rev-list", "--count", f"{mb}..{current_branch}"], cwd=dest, capture_output=True, text=True)
+                                if dist_res.returncode == 0:
+                                    dist = int(dist_res.stdout.strip())
+                                    if dist < min_distance:
+                                        min_distance = dist
+                                        target_dev = cand
+
+                    if not target_dev:
+                        current_version = str(item.get("version", "0.0.1")).strip()
+                        parts = current_version.replace("v", "").split(".")
+                        guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
+                        target_dev = f"dev-v{guess_version}"
+
+                    if not args.assume_yes:
+                        ans = input(f"  > Merge '{current_branch}' into '{target_dev}'? [Y/n]: ").strip().lower()
+                        if ans in ("n", "no"):
+                            target_dev = input(f"  > Enter target branch manually: ").strip()
+
+                    if target_dev not in all_branches:
+                        print(f"  - Creating required integration branch '{target_dev}' from '{default_branch}'...")
+                        subprocess.run(["git", "branch", target_dev, default_branch], cwd=dest, capture_output=True)
+
                     subprocess.run(["git", "checkout", target_dev], cwd=dest, capture_output=True)
                     subprocess.run(["git", "pull", "--rebase", "origin", target_dev], cwd=dest, capture_output=True)
-                    if subprocess.run(["git", "merge", current_branch, "--no-ff", "-m", f"Merge feature '{current_branch}'"], cwd=dest, capture_output=True, text=True).returncode != 0:
-                        subprocess.run(["git", "merge", "--abort"], cwd=dest, capture_output=True)
+
+                    # --- EMPTY BRANCH CHECK ---
+                    ahead_check = subprocess.run(["git", "rev-list", "--count", f"{target_dev}..{current_branch}"], cwd=dest, capture_output=True, text=True)
+                    ahead_count = int(ahead_check.stdout.strip()) if ahead_check.returncode == 0 and ahead_check.stdout.strip().isdigit() else 0
+
+                    if ahead_count == 0:
+                        print(f"  - No new changes in '{current_branch}'. Dropping branch.")
+                        subprocess.run(["git", "branch", "-d", current_branch], cwd=dest, capture_output=True)
+                        if args.push:
+                            subprocess.run(["git", "push", "origin", "--delete", current_branch], cwd=dest, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         continue
 
+                    print(f"  - Merging '{current_branch}' into '{target_dev}'...")
+                    if subprocess.run(["git", "merge", current_branch, "--no-ff", "-m", f"Merge feature '{current_branch}'"], cwd=dest, capture_output=True, text=True).returncode != 0:
+                        subprocess.run(["git", "merge", "--abort"], cwd=dest, capture_output=True)
+                        print(f"  \033[91m! Merge conflict. Aborting.\033[0m")
+                        continue
+
+                    # Delete local feature branch
                     subprocess.run(["git", "branch", "-d", current_branch], cwd=dest, capture_output=True)
+
                     if args.push:
-                        subprocess.run(["git", "push", "origin", target_dev], cwd=dest, capture_output=True)
+                        print(f"  - Pushing branch '{target_dev}' to origin...")
+                        subprocess.run(["git", "push", "-u", "origin", target_dev], cwd=dest, capture_output=True)
                         subprocess.run(["git", "push", "origin", "--delete", current_branch], cwd=dest, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                 if args.publish_release:
@@ -514,19 +604,39 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"  \033[91m❌ Blocked: Cannot publish release for '{name}' because it has uncommitted changes.\033[0m")
                         continue
 
-                    current_version = str(item.get("version", "0.0.1")).strip()
-                    parts = current_version.replace("v", "").split(".")
-                    guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
-                    default_dev = f"dev-v{guess_version}"
+                    res_all = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=dest, capture_output=True, text=True)
+                    all_branches = [b.strip() for b in res_all.stdout.splitlines() if b.strip()]
 
-                    release_branch = default_dev if args.assume_yes else (input(f"  > Which integration branch are we releasing? [{default_dev}]: ").strip() or default_dev)
-                    if subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{release_branch}"], cwd=dest).returncode != 0: continue
+                    if current_branch.startswith("dev-"):
+                        release_branch = current_branch
+                    else:
+                        dev_branches = sorted([b for b in all_branches if b.startswith("dev-")], reverse=True)
+                        if not dev_branches:
+                            print(f"  \033[93m! No integration branches found for '{name}'. Skipping.\033[0m")
+                            continue
+                        release_branch = dev_branches[0]
 
-                    tag_name = release_branch[4:] if release_branch.startswith("dev-") else f"v{guess_version}"
+                    if not args.assume_yes:
+                        ans = input(f"  > Merge '{release_branch}' into '{default_branch}' and tag release? [Y/n]: ").strip().lower()
+                        if ans in ("n", "no"): continue
+
+                    tag_name = release_branch[4:] if release_branch.startswith("dev-") else f"v{release_branch}"
+
                     subprocess.run(["git", "checkout", default_branch], cwd=dest, capture_output=True)
                     subprocess.run(["git", "pull", "--rebase", "origin", default_branch], cwd=dest, capture_output=True)
+
+                    # --- EMPTY BRANCH CHECK ---
+                    ahead_check = subprocess.run(["git", "rev-list", "--count", f"{default_branch}..{release_branch}"], cwd=dest, capture_output=True, text=True)
+                    ahead_count = int(ahead_check.stdout.strip()) if ahead_check.returncode == 0 and ahead_check.stdout.strip().isdigit() else 0
+
+                    if ahead_count == 0:
+                        print(f"  - No new changes in '{release_branch}' to release. Skipping.")
+                        continue
+
+                    print(f"  - Releasing '{release_branch}' to '{default_branch}' as '{tag_name}'...")
                     if subprocess.run(["git", "merge", release_branch, "--no-ff", "-m", f"Release {tag_name}"], cwd=dest, capture_output=True, text=True).returncode != 0:
                         subprocess.run(["git", "merge", "--abort"], cwd=dest, capture_output=True)
+                        print(f"  \033[91m! Merge conflict. Aborting.\033[0m")
                         continue
 
                     check_tag = subprocess.run(["git", "tag", "-l", tag_name], cwd=dest, capture_output=True, text=True)
@@ -538,21 +648,34 @@ def main(argv: list[str] | None = None) -> int:
                         _update_yaml_version(tmpl_dir, raw_token, new_yaml_version)
 
                     if args.push:
+                        print(f"  - Pushing branch '{default_branch}' and tag '{tag_name}' to origin...")
                         subprocess.run(["git", "push", "origin", default_branch], cwd=dest, capture_output=True, text=True)
                         subprocess.run(["git", "push", "origin", tag_name], cwd=dest, capture_output=True, text=True)
 
                 if args.drop_feature:
                     if current_branch == default_branch or current_branch.startswith("dev-"): continue
-                    current_version = str(item.get("version", "0.0.1")).strip()
-                    parts = current_version.replace("v", "").split(".")
-                    guess_version = f"{parts[0]}.{parts[1]}.{int(parts[2]) + 1}" if len(parts) == 3 and parts[2].isdigit() else f"{current_version}-next"
-                    default_dev = f"dev-v{guess_version}"
 
-                    target_dev = default_dev if args.assume_yes else (input(f"  > Drop '{current_branch}' and return to which dev branch? [{default_dev}]: ").strip() or default_dev)
-                    if subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{target_dev}"], cwd=dest).returncode != 0: continue
+                    # --- SMART PARENT DETECTION ---
+                    res_all = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=dest, capture_output=True, text=True)
+                    all_branches = [b.strip() for b in res_all.stdout.splitlines() if b.strip()]
+                    dev_branches = sorted([b for b in all_branches if b.startswith("dev-")], reverse=True)
+                    candidates = dev_branches + [default_branch]
+
+                    target_dev = default_branch
+                    min_distance = float('inf')
+                    for cand in candidates:
+                        mb_res = subprocess.run(["git", "merge-base", current_branch, cand], cwd=dest, capture_output=True, text=True)
+                        if mb_res.returncode == 0:
+                            mb = mb_res.stdout.strip()
+                            dist_res = subprocess.run(["git", "rev-list", "--count", f"{mb}..{current_branch}"], cwd=dest, capture_output=True, text=True)
+                            if dist_res.returncode == 0:
+                                dist = int(dist_res.stdout.strip())
+                                if dist < min_distance:
+                                    min_distance = dist
+                                    target_dev = cand
 
                     if not args.assume_yes:
-                        ans_confirm = input(f"  > \033[91mWARNING: This will permanently delete '{current_branch}'. Proceed? [y/N]:\033[0m ").strip().lower()
+                        ans_confirm = input(f"  > \033[91mWARNING: This will permanently delete '{current_branch}' and return to '{target_dev}'. Proceed? [y/N]:\033[0m ").strip().lower()
                         if ans_confirm not in ("y", "yes"): continue
 
                     subprocess.run(["git", "reset", "--hard"], cwd=dest, capture_output=True)

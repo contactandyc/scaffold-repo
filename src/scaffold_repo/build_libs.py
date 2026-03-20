@@ -40,7 +40,7 @@ def _ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | N
         fetch_cmd = ["git", "-C", str(dest), "fetch", "origin", branch]
         if shallow is None or shallow is True: fetch_cmd += ["--depth", "1"]
         try: _run(fetch_cmd)
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError:
             print(f"⚠️  skip {dest.name}: branch/tag {branch} not found")
             return
         try: _run(["git", "-C", str(dest), "checkout", "-B", branch, f"origin/{branch}"])
@@ -57,26 +57,41 @@ def _ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | N
 def _sanitize_steps(steps: list[str]) -> list[str]:
     out: list[str] = []
     for raw in steps or []:
-        s = raw.strip()
+        s = str(raw).strip()
         if not s: continue
-        if re.search(r"^\s*git\s+clone\b", s) or re.search(r"^\s*rm\s+-rf\b", s) or re.fullmatch(r"\s*cd\s+/\s*", s): continue
+        if "git clone" in s or "rm -rf" in s: continue
         out.append(s)
     return out
 
 def _run_steps_chain(steps: list[str], *, cwd: Path) -> None:
     if not steps: return
+
     prologue = r"""
         set -Eeuo pipefail
         nproc() { (command -v nproc >/dev/null && command nproc) || (sysctl -n hw.ncpu 2>/dev/null) || (getconf _NPROCESSORS_ONLN 2>/dev/null) || echo 4; }
+        
+        _cur="$PWD"
+        while [ "$_cur" != "/" ]; do
+          if [ -f "$_cur/.scaffoldrc" ]; then
+            source "$_cur/.scaffoldrc"
+            break
+          fi
+          _cur="$(dirname "$_cur")"
+        done
+        [ -z "${WORKSPACE_DIR:-}" ] && [ -f "$HOME/.scaffoldrc" ] && source "$HOME/.scaffoldrc" || true
+        
+        SUDO=""
+        if [[ "${PREFIX:-/usr/local}" == "/usr"* || "${PREFIX:-/usr/local}" == "/opt"* || "${PREFIX:-/usr/local}" == "/Library"* ]] && [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+            SUDO="sudo "
+        fi
     """
+
     chain = " && \\\n  ".join(steps)
     script = prologue + "\n" + chain + "\n"
     _run(["bash", "-lc", script], cwd=cwd)
 
 def _normalize_dependency(raw_item) -> dict:
-    """Normalizes a dependency from either a shorthand string (flavor+url@rev) or a dict."""
-    norm = {"flavor": "cmake", "url": None, "revision": None, "is_alias": False, "build_args": [], "env": {}}
-
+    norm = {"flavor": "cmake", "url": None, "revision": None, "is_alias": False, "build_args": [], "env": {}, "shallow": True}
     if isinstance(raw_item, str):
         s = raw_item.strip()
         if "+" in s and "://" not in s.split("+", 1)[0]:
@@ -88,7 +103,6 @@ def _normalize_dependency(raw_item) -> dict:
         norm["url"] = s
         if not s.startswith(("http://", "https://", "git@")):
             norm["is_alias"] = True
-
     elif isinstance(raw_item, dict):
         data = raw_item
         if len(raw_item) == 1:
@@ -97,10 +111,10 @@ def _normalize_dependency(raw_item) -> dict:
                 data = raw_item[key]
                 if key.startswith(("http://", "https://", "git@")):
                     norm["url"] = key
-
         norm["flavor"] = data.get("flavor", "cmake")
         norm["url"] = data.get("url") or data.get("source") or norm["url"]
         norm["revision"] = data.get("revision") or data.get("tag") or data.get("branch")
+        norm["shallow"] = data.get("shallow", True)
         norm["build_args"] = _coerce_list(data.get("build_args", []))
         norm["env"] = data.get("env", {})
         if norm["url"] and not norm["url"].startswith(("http://", "https://", "git@")):
@@ -117,7 +131,6 @@ def resolve_dependency_graph(
         graph: dict | None = None,
         visited: set | None = None
 ) -> dict:
-    """Recursively parses scaffold.yaml files, clones missing repos, and builds a dependency map."""
     if graph is None: graph = {}
     if visited is None: visited = set()
 
@@ -134,7 +147,6 @@ def resolve_dependency_graph(
         except Exception:
             pass
 
-    # Extract dependencies from local truth
     raw_deps = _coerce_list(local_data.get("depends_on", []))
     for app in local_data.get("apps", {}).values():
         raw_deps.extend(_coerce_list(app.get("depends_on", [])))
@@ -144,44 +156,40 @@ def resolve_dependency_graph(
     for raw in raw_deps:
         dep = _normalize_dependency(raw)
 
-        # 1. Resolve Name and URL
         if dep["is_alias"]:
-            idx = global_registry
             alias_slug = _slug(dep["url"])
-            if alias_slug in idx:
-                dep_url = idx[alias_slug]["item"].get("url")
-                dep_name = idx[alias_slug]["name"]
-                dep_rev = dep["revision"] or idx[alias_slug]["item"].get("branch")
+            if alias_slug in global_registry:
+                dep_url = global_registry[alias_slug]["item"].get("url")
+                dep_name = global_registry[alias_slug]["name"]
+                dep_rev = dep["revision"] or global_registry[alias_slug]["item"].get("branch")
+                dep_shallow = global_registry[alias_slug]["item"].get("shallow", True)
             else:
-                continue # System dependency or not found
+                continue
         else:
             dep_url = dep["url"]
-            # Extract folder name from URL (e.g. 'restinio' from '.../restinio.git')
             dep_name = dep_url.split("/")[-1].replace(".git", "")
             dep_rev = dep["revision"]
+            dep_shallow = dep.get("shallow", True)
 
         if not dep_url: continue
 
         dep_path = workspace_dir / dep_name
         resolved_deps.append(dep_name)
 
-        # 2. Clone if missing
         if not dep_path.exists():
             print(f"📦 Fetching dependency: {dep_name} -> {dep_url}")
-            _ensure_clone(dep_url, dep_path, branch=dep_rev, shallow=True)
+            _ensure_clone(dep_url, dep_path, branch=dep_rev, shallow=dep_shallow)
 
-        # 3. Recurse into the dependency
         resolve_dependency_graph(dep_path, global_registry, workspace_dir, graph, visited)
 
     graph[target_slug] = {
         "deps": _dedupe(resolved_deps),
         "path": target_repo_path,
-        "build_args": [] # Could store overrides here
+        "build_args": []
     }
     return graph
 
 def _toposort_graph(graph: dict) -> list[str]:
-    """Topologically sort the resolved graph."""
     indeg = {s: 0 for s in graph}
     adj = {s: [] for s in graph}
     for s, info in graph.items():
@@ -201,9 +209,55 @@ def _toposort_graph(graph: dict) -> list[str]:
                 queue.append(m)
     return ordered
 
+def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Path, do_install: bool = True) -> None:
+    """Centralized execution engine for both 1st-party targets and 3rd-party dependencies."""
+
+    if (target_dir / "build.sh").exists():
+        print("  • using local build.sh")
+        cmds = ["./build.sh clean"]
+        if do_install:
+            cmds.append("./build.sh install")
+        else:
+            cmds.append("./build.sh build")
+        _run_steps_chain(cmds, cwd=target_dir)
+
+    elif (target_dir / "CMakeLists.txt").exists():
+        print("  • using smart CMake fallback")
+        extra_cmake_args = []
+        raw_steps = _coerce_list(reg_item.get("build_steps", []))
+        for step in raw_steps:
+            if "cmake " in step:
+                args = re.findall(r"-D[^\s]+", step)
+                for a in args:
+                    if not a.startswith("-DCMAKE_INSTALL_PREFIX") and not a.startswith("-DCMAKE_BUILD_TYPE"):
+                        if a not in extra_cmake_args:
+                            extra_cmake_args.append(a)
+
+        args_str = " ".join(extra_cmake_args)
+        cmds = [
+            f'mkdir -p build',
+            f'cd build',
+            f'cmake .. -DCMAKE_BUILD_TYPE=${{BUILD_TYPE:-Release}} -DCMAKE_INSTALL_PREFIX=${{PREFIX:-/usr/local}} {args_str}',
+            f'cmake --build . -j"$(nproc)"'
+        ]
+        if do_install:
+            cmds.append(f'${{SUDO}}cmake --install .')
+
+        _run_steps_chain(cmds, cwd=target_dir)
+
+    elif reg_item.get("build_steps"):
+        print("  • using explicit build_steps from registry")
+        raw_steps = _coerce_list(reg_item["build_steps"])
+        sanitized = _sanitize_steps(raw_steps)
+        steps = [s.replace("/usr/local", "${PREFIX:-/usr/local}").replace("sudo ", "${SUDO}") for s in sanitized]
+        _run_steps_chain(steps, cwd=target_dir)
+
+    else:
+        print(f"  ⚠️  skip {slug}: no build.sh, CMakeLists.txt, or build_steps found.")
+
 def build_all_libs(
         repo: Path,
-        workspace_dir: Path, # Explicitly receive the absolute path
+        workspace_dir: Path,
         *,
         project_tokens: list[str],
         templates_dir: str | None,
@@ -235,31 +289,22 @@ def build_all_libs(
         dep_path = graph[slug]["path"]
         print(f"\n=== Processing Dependency: {slug} ===")
 
-        manifest_path = dep_path / "scaffold.yaml"
-        local_data = {}
-        if manifest_path.exists():
-            try:
-                local_data = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-            except Exception: pass
+        if not do_build:
+            print(f"✅ fetched: {slug}")
+            continue
 
-        steps = [str(s) for s in (local_data.get("build_steps") or [])]
-        steps = _sanitize_steps(steps)
+        reg_item = None
+        if slug in global_registry:
+            reg_item = global_registry[slug]["item"]
+        else:
+            for k, v in global_registry.items():
+                if v.get("name") == slug or v.get("slug") == slug or k.endswith(f"-{slug}") or k == slug:
+                    reg_item = v.get("item")
+                    break
 
-        if not steps and do_build:
-            # FLAVOR FALLBACK
-            cmds = [
-                f'mkdir -p build',
-                f'cd build',
-                f'cmake .. -DCMAKE_BUILD_TYPE=Release',
-                f'cmake --build . -j"$(nproc)"',
-            ]
-            if do_install:
-                cmds.append(f'sudo cmake --install .')
+        if not reg_item:
+            reg_item = {}
 
-            print("• using generic CMake fallback")
-            _run_steps_chain(cmds, cwd=dep_path)
-        elif steps and do_build:
-            print("• using local build_steps")
-            _run_steps_chain(steps, cwd=dep_path)
+        execute_build(slug, dep_path, reg_item, workspace_dir, do_install=do_install)
 
         print(f"✅ done: {slug}")

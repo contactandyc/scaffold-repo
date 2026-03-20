@@ -1,13 +1,12 @@
 kind: git
 url: https://github.com/chriskohlhoff/asio.git
 branch: asio-1-30-2
-dir: asio
+shallow: true
 build_steps:
-  - git clone --depth 1 --branch asio-1-30-2 --single-branch "https://github.com/chriskohlhoff/asio.git" "asio"
-  - cd asio/asio && ./autogen.sh && cd ../../
-  - mkdir -p build/asio && cd build/asio
-  - ../../asio/asio/configure --prefix=/usr/local
-  - make -j"$(nproc)" && sudo make install
-  - cd ../.. && rm -rf asio
-find_package: "asio REQUIRED"
-link: "asio::asio"
+  - ./autogen.sh
+  - ./configure --prefix=/usr/local
+  - make -j"$(nproc)"
+  - sudo make install
+find_package: null
+pkg_config: asio
+link: asio

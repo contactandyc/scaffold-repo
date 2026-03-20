@@ -23,10 +23,11 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-{% if cmake.apt_dev_packages %}
+{% set apt_dev = cmake.get('apt_dev_packages', []) if cmake is mapping else [] %}
+{% if apt_dev %}
 # Development tooling (optional)
 RUN apt-get update && apt-get install -y \
-{% for p in cmake.apt_dev_packages %}
+{% for p in apt_dev %}
     {{ p }} \
 {% endfor %}
  && rm -rf /var/lib/apt/lists/*
@@ -57,13 +58,25 @@ WORKDIR /workspace
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --upgrade pip
 ENV PATH="/opt/venv/bin:${PATH}"
 
-{% for lib in cmake.libraries if lib.kind in ["git","tar"] and lib.build_steps %}
-# --- Build & install {{ lib.name }} ---
-RUN set -eux; \
-{% for s in lib.build_steps %}
-  {{ s }}{% if not loop.last %} && \{% endif %}
-
+{% set libs = cmake.get('libraries', []) if cmake is mapping else [] %}
+{% for lib in libs if lib.get('kind') in ["git","tar"] and lib.get('build_steps') %}
+# --- Build & install {{ lib.get('name', 'dependency') }} ---
+{% set lib_url = lib.get('url') or ("https://github.com/" ~ github_project|default('contactandyc') ~ "/" ~ lib.name ~ ".git") %}
+{% set clean_steps = [] %}
+{% for s in lib.get('build_steps', []) %}
+  {% if 'git clone' not in s and 'rm -rf' not in s and not s.startswith('cd ') %}
+    {% set _ = clean_steps.append(s) %}
+  {% endif %}
 {% endfor %}
+RUN set -eux; \
+    git clone {% if lib.get('shallow', true) %}--depth 1 {% endif %}{% if lib.get('branch') %}--branch {{ lib.get('branch') }} {% endif %}--single-branch "{{ lib_url }}" "{{ lib.name }}"; \
+    cd "{{ lib.name }}"; \
+{% for s in clean_steps %}
+    {{ s }}{% if not loop.last %} && \{% endif %}
+
+{% endfor %}; \
+    cd ..; \
+    rm -rf "{{ lib.name }}"
 
 {% endfor %}
 

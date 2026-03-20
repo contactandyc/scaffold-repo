@@ -254,10 +254,13 @@ class TemplateSource:
                             if "profile" in v: v["profile"] = _process_ref(v["profile"], "profiles")
                             if "license_profile" in v: v["license_profile"] = _process_ref(v["license_profile"], "licenses")
                             if "depends_on" in v: v["depends_on"] = [_process_ref(d, "libraries", add_include=False) for d in _coerce_list(v["depends_on"])]
+
+                            # Original robust logic restored:
                             if "license_extras" in v and isinstance(v["license_extras"], dict):
                                 v["license_extras"] = {ek: _process_ref(ev, "licenses") for ek, ev in v["license_extras"].items()}
                             if "license_overrides" in v and isinstance(v["license_overrides"], dict):
                                 v["license_overrides"] = {ek: _process_ref(ev, "licenses") for ek, ev in v["license_overrides"].items()}
+
                             if "binaries" in v and isinstance(v["binaries"], list):
                                 for b in v["binaries"]:
                                     if isinstance(b, dict):
@@ -411,6 +414,11 @@ class ConfigReader:
         if rc_cfg.get("workspace_dir"):
             self.cfg["workspace_dir"] = rc_cfg["workspace_dir"]
 
+        for f in self.tmpl_src.find_registry_yamls("profiles"):
+            data = self.tmpl_src._load_logical_path(f)
+            if data:
+                self.cfg = _deep_merge(self.cfg, data)
+
         for f in self.tmpl_src.find_registry_yamls("libraries"):
             data = self.tmpl_src._load_logical_path(f)
             if data and "libraries" in data:
@@ -448,6 +456,16 @@ class ConfigReader:
                 if lic_ref:
                     lic_path = lic_ref if lic_ref.endswith(".yaml") else f"licenses/{lic_ref}.yaml"
                     self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(lic_path))
+
+                # --- THE FIX: EXPLICTLY LOAD LICENSE EXTRAS FROM LOCAL REPOS ---
+                for l_key in ("license_extras", "license_overrides"):
+                    l_dict = local_data.get(l_key)
+                    if isinstance(l_dict, dict):
+                        for _, ref_val in l_dict.items():
+                            if isinstance(ref_val, str):
+                                ref_path = ref_val if ref_val.endswith(".yaml") else f"licenses/{ref_val}.yaml"
+                                self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(ref_path))
+                # ---------------------------------------------------------------
 
                 # 4. Merge the local data OVER the resolved templates/profiles
                 self.cfg = _deep_merge(self.cfg, local_data)
@@ -1028,7 +1046,7 @@ class ConfigReader:
     def _discover_jinja_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if not is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/"): continue
+            if not is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
             text = data.decode("utf-8", errors="replace")
             meta, inline_template = _extract_annotation(text)
             dest = (meta or {}).get("dest") or self._strip_package_prefix(rel)[:-3]
@@ -1041,7 +1059,7 @@ class ConfigReader:
     def _discover_copy_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or rel == ".scaffold-defaults.yaml": continue
+            if is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
             dest = self._strip_package_prefix(rel)
             if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
             executable = False

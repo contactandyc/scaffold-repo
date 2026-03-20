@@ -1,18 +1,16 @@
 kind: git
 url: https://github.com/contactandyc/restinio.git
 branch: v.0.7.3-fork
-dir: restinio/dev
-build_steps:
-  - git clone --depth 1 --branch v.0.7.3-fork --single-branch "https://github.com/contactandyc/restinio.git" "restinio"
-  - mkdir -p build/restinio && cd build/restinio
-  - cmake ../../restinio/dev -DRESTINIO_SAMPLE=OFF -DRESTINIO_TEST=OFF -DRESTINIO_DEP_FMT=system -DRESTINIO_DEP_EXPECTED_LITE=system
-  - make -j"$(nproc)" && sudo make install
-  - cd ../.. && rm -rf restinio
-find_package: "restinio REQUIRED"
-link: "restinio::restinio"
-license_spdx: BSD-3-Clause
-attribution: "restinio by Stiffstream — BSD-3-Clause"
+shallow: true
 depends_on:
   - custom/fmt
   - custom/expected-lite
   - common/asio
+build_steps:
+  - cmake -S dev -B dev/build -DCMAKE_INSTALL_PREFIX=/usr/local -DRESTINIO_SAMPLE=OFF -DRESTINIO_TEST=OFF -DRESTINIO_DEP_FMT=system -DRESTINIO_DEP_EXPECTED_LITE=system
+  - cmake --build dev/build -j"$(nproc)"
+  - sudo cmake --install dev/build
+find_package: "restinio REQUIRED"
+link: "restinio::restinio"
+license_spdx: BSD-3-Clause
+attribution: "restinio by Stiffstream — BSD-3-Clause"

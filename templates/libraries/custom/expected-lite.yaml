@@ -1,11 +1,10 @@
 kind: git
 url: https://github.com/contactandyc/restinio.git
-dir: restinio/expected-lite
+branch: v.0.7.3-fork
+shallow: true
 build_steps:
-  - git clone --depth 1 "https://github.com/contactandyc/restinio.git" "restinio"
-  - mkdir -p build/expected-lite && cd build/expected-lite
-  - cmake ../../restinio/expected-lite
-  - make -j"$(nproc)" && sudo make install
-  - cd ../.. && rm -rf restinio
+  - cmake -S expected-lite -B expected-lite/build -DCMAKE_INSTALL_PREFIX=/usr/local
+  - cmake --build expected-lite/build -j"$(nproc)"
+  - sudo cmake --install expected-lite/build
 find_package: "expected-lite CONFIG REQUIRED"
 link: "nonstd::expected-lite"
