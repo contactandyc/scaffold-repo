@@ -63,29 +63,33 @@ def _sanitize_steps(steps: list[str]) -> list[str]:
         out.append(s)
     return out
 
-def _run_steps_chain(steps: list[str], *, cwd: Path) -> None:
+def _run_steps_chain(steps: list[str], *, cwd: Path, stack: str = "generic", stack_type: str = "") -> None:
     if not steps: return
 
     # --- Print a clean, human-readable version to the terminal ---
     clean_print = " && \\\n  ".join(steps)
     print(f"$ {clean_print}")
 
-    prologue = r"""
+    # Determine the scoped environment file based on the dependency's stack
+    env_name = f"{stack}_{stack_type}".strip("_").lower()
+    env_file = f".scaffoldrc_{env_name}" if env_name else ".scaffoldrc"
+
+    prologue = f"""
         set -Eeuo pipefail
-        nproc() { (command -v nproc >/dev/null && command nproc) || (sysctl -n hw.ncpu 2>/dev/null) || (getconf _NPROCESSORS_ONLN 2>/dev/null) || echo 4; }
+        nproc() {{ (command -v nproc >/dev/null && command nproc) || (sysctl -n hw.ncpu 2>/dev/null) || (getconf _NPROCESSORS_ONLN 2>/dev/null) || echo 4; }}
         
         _cur="$PWD"
         while [ "$_cur" != "/" ]; do
-          if [ -f "$_cur/.scaffoldrc" ]; then
-            source "$_cur/.scaffoldrc"
+          if [ -f "$_cur/.scaffoldrc.yaml" ]; then
+            [ -f "$_cur/{env_file}" ] && source "$_cur/{env_file}"
             break
           fi
           _cur="$(dirname "$_cur")"
         done
-        [ -z "${WORKSPACE_DIR:-}" ] && [ -f "$HOME/.scaffoldrc" ] && source "$HOME/.scaffoldrc" || true
+        [ -z "${{WORKSPACE_DIR:-}}" ] && [ -f "$HOME/{env_file}" ] && source "$HOME/{env_file}" || true
         
         SUDO=""
-        if [[ "${PREFIX:-/usr/local}" == "/usr"* || "${PREFIX:-/usr/local}" == "/opt"* || "${PREFIX:-/usr/local}" == "/Library"* ]] && [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+        if [[ "${{PREFIX:-/usr/local}}" == "/usr"* || "${{PREFIX:-/usr/local}}" == "/opt"* || "${{PREFIX:-/usr/local}}" == "/Library"* ]] && [[ "${{EUID:-$(id -u)}}" -ne 0 ]]; then
             SUDO="sudo "
         fi
     """
@@ -93,16 +97,20 @@ def _run_steps_chain(steps: list[str], *, cwd: Path) -> None:
     chain = " && \\\n  ".join(steps)
     script = prologue + "\n" + chain + "\n"
 
-    # --- Bypass _run() so it doesn't double-print the massive script ---
     subprocess.run(["bash", "-lc", script], cwd=cwd, check=True)
 
 def _normalize_dependency(raw_item) -> dict:
-    norm = {"flavor": "cmake", "url": None, "revision": None, "is_alias": False, "build_args": [], "env": {}, "shallow": False}
+    norm = {"stack": "generic", "stack_type": "", "url": None, "revision": None, "is_alias": False, "build_args": [], "env": {}, "shallow": False}
     if isinstance(raw_item, str):
         s = raw_item.strip()
         if "+" in s and "://" not in s.split("+", 1)[0]:
-            flavor, s = s.split("+", 1)
-            norm["flavor"] = flavor.lower()
+            stack_str, s = s.split("+", 1)
+            if "/" in stack_str:
+                norm["stack"], norm["stack_type"] = stack_str.split("/", 1)
+                norm["stack"] = norm["stack"].lower()
+                norm["stack_type"] = norm["stack_type"].lower()
+            else:
+                norm["stack"] = stack_str.lower()
         if "@" in s:
             s, rev = s.rsplit("@", 1)
             norm["revision"] = rev
@@ -117,7 +125,16 @@ def _normalize_dependency(raw_item) -> dict:
                 data = raw_item[key]
                 if key.startswith(("http://", "https://", "git@")):
                     norm["url"] = key
-        norm["flavor"] = data.get("flavor", "cmake")
+
+        stack_val = data.get("stack", "generic")
+        if "/" in stack_val:
+            norm["stack"], norm["stack_type"] = stack_val.split("/", 1)
+            norm["stack"] = norm["stack"].lower()
+            norm["stack_type"] = norm["stack_type"].lower()
+        else:
+            norm["stack"] = stack_val.lower()
+            norm["stack_type"] = str(data.get("stack_type", "")).lower()
+
         norm["url"] = data.get("url") or data.get("source") or norm["url"]
         norm["revision"] = data.get("revision") or data.get("tag") or data.get("branch")
         norm["shallow"] = data.get("shallow", False)
@@ -216,7 +233,8 @@ def _toposort_graph(graph: dict) -> list[str]:
     return ordered
 
 def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Path, do_build: bool = True, do_install: bool = True, do_clean: bool = False) -> None:
-    """Centralized execution engine for both 1st-party targets and 3rd-party dependencies."""
+    stack = reg_item.get("stack", "generic")
+    stack_type = reg_item.get("stack_type", "")
 
     if (target_dir / "build.sh").exists():
         print(f"  • using local build.sh (clean={do_clean}, build={do_build}, install={do_install})")
@@ -229,7 +247,7 @@ def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Pa
             cmds.append("./build.sh build")
 
         if cmds:
-            _run_steps_chain(cmds, cwd=target_dir)
+            _run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
 
     elif (target_dir / "CMakeLists.txt").exists():
         print(f"  • using smart CMake fallback (clean={do_clean}, build={do_build}, install={do_install})")
@@ -259,24 +277,21 @@ def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Pa
                 cmds.append(f'${{SUDO}}cmake --install .')
 
         if cmds:
-            _run_steps_chain(cmds, cwd=target_dir)
+            _run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
 
     elif reg_item.get("build_steps"):
         print(f"  • using explicit build_steps from registry (clean={do_clean}, build={do_build})")
         raw_steps = _coerce_list(reg_item["build_steps"])
         sanitized = _sanitize_steps(raw_steps)
 
-        # Filter logic based on flags
         if not do_build and not do_install:
-            # ONLY keep clean steps
             sanitized = [s for s in sanitized if "clean" in s or "rm -rf" in s]
         elif not do_clean:
-            # ONLY keep build steps
             sanitized = [s for s in sanitized if s.strip() not in ("./build.sh clean", "make clean", "ninja clean") and "rm -rf" not in s]
 
         if sanitized:
             steps = [s.replace("/usr/local", "${PREFIX:-/usr/local}").replace("sudo ", "${SUDO}") for s in sanitized]
-            _run_steps_chain(steps, cwd=target_dir)
+            _run_steps_chain(steps, cwd=target_dir, stack=stack, stack_type=stack_type)
 
     else:
         print(f"  ⚠️  skip {slug}: no build.sh, CMakeLists.txt, or build_steps found.")
@@ -288,13 +303,15 @@ def build_all_libs(
         *,
         project_tokens: list[str],
         templates_dir: str | None,
+        base_templates_dir: str | None = None,
         do_clone: bool = True,
         do_build: bool = True,
         do_install: bool = True,
         do_clean: bool = False
 ) -> None:
     repo = repo.resolve()
-    reader = ConfigReader(repo, project_name=None, templates_dir=templates_dir)
+    reader = ConfigReader(repo, project_name=None, templates_dir=templates_dir,
+                          base_templates_dir=base_templates_dir)
     reader.load()
 
     reader.effective_config["workspace_dir"] = str(workspace_dir)
@@ -317,7 +334,6 @@ def build_all_libs(
         dep_path = graph[slug]["path"]
         print(f"\n=== Processing Dependency: {slug} ===")
 
-        # If they aren't building AND aren't cleaning, just skip execution
         if not do_build and not do_clean:
             print(f"✅ fetched: {slug}")
             continue

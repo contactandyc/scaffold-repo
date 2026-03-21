@@ -28,18 +28,23 @@ def verify_repo(
         include_exts: set[str] | None = None,
         project_name: str | None = None,
         templates_dir: str | None = None,
+        base_templates_dir: str | None = None,  # <-- ADD THIS
         assume_yes: bool = False,
         show_diffs: bool = False,
+        is_init: bool = False
 ) -> tuple[int, dict[str, Any]]:
     rc_apply = apply_repo(
         repo,
         project_name=project_name,
         templates_dir=templates_dir,
+        base_templates_dir=base_templates_dir,  # <-- ADD THIS
         assume_yes=assume_yes,
         show_diffs=show_diffs,
+        is_init=is_init
     )
 
-    reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir)
+    reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir,
+                          base_templates_dir=base_templates_dir, is_init=is_init)
     reader.load()
     res = validate_licenses(
         repo,
@@ -58,11 +63,14 @@ def apply_repo(
         *,
         project_name: str | None = None,
         templates_dir: str | None = None,
+        base_templates_dir: str | None = None,
         assume_yes: bool = False,
         show_diffs: bool = False,
+        is_init: bool = False
 ) -> int:
     repo = Path(repo).resolve()
-    reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir)
+    reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir,
+                          base_templates_dir=base_templates_dir, is_init=is_init)
     try:
         reader.load()
     except Exception as e:
@@ -194,7 +202,7 @@ def iter_repo_files_for_license_check(repo: Path, include_exts: set[str]):
 _OSS_HEADER_EXTS = {
     ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts",
     ".tsx", ".mjs", ".cjs", ".go", ".rs", ".swift", ".kt", ".cs",
-    ".cmake", ".mk", ".make",
+    ".cmake", ".mk", ".make", ".py", ".sh"
 }
 
 _OSS_NEWLINE_EXTS = {

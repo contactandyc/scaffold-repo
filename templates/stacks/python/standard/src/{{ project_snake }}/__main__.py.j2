@@ -1,0 +1,12 @@
+{#- scaffold-repo: { dest: "src/{{ project_snake }}/__main__.py", updatable: false } -#}
+import sys
+
+def main():
+    print("Hello from {{ project_name }}!")
+    {% if is_cli_app == "CLI Application" %}
+    print("Run me anywhere using your CLI command!")
+    {% endif %}
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

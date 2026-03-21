@@ -7,7 +7,6 @@ import hashlib
 import os
 import posixpath
 import re
-import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,21 +148,20 @@ def _normalize_for_cmp(text: str, path: Path, header_managed: bool) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TemplateSource:
-    def __init__(self, fs_dir: Path | None = None, pkg_rel: str | None = "templates"):
-        import importlib.resources as resources
+    def __init__(self, fs_dir: Path | None = None, base_dir: Path | None = None, pkg_rel: str | None = "templates"):
+        # fs_dir acts as the Local Overlay
         self.fs_dir: Path | None = fs_dir if (fs_dir and fs_dir.is_dir()) else None
-        self._pkg_root = None
-        self._resources = resources
-        if pkg_rel:
+
+        # _pkg_root acts as the Base Registry
+        self._pkg_root = base_dir if (base_dir and base_dir.is_dir()) else None
+
+        if self._pkg_root is None and pkg_rel:
+            import importlib.resources as resources
             try:
                 self._pkg_root = resources.files("scaffold_repo").joinpath(pkg_rel)
                 _ = list(self._pkg_root.iterdir())
             except Exception:
                 self._pkg_root = None
-        if self.fs_dir is None and self._pkg_root is None:
-            dev = Path(__file__).resolve().parents[2] / "templates"
-            if dev.is_dir():
-                self.fs_dir = dev
 
     def find_registry_yamls(self, prefix: str) -> list[str]:
         out = []
@@ -391,19 +389,27 @@ def _extract_dep_name(raw_dep: Any) -> str:
 
 
 class ConfigReader:
-    def __init__(self, repo: Path, *, project_name: str | None = None, templates_dir: str | None = None):
+    def __init__(self, repo: Path, *, project_name: str | None = None, templates_dir: str | None = None, base_templates_dir: str | None = None, is_init: bool = False):
         self.repo = repo.resolve()
         self.cfg: dict = {}
         self.project_name: str | None = project_name
         self.templates_dir = templates_dir
+        self.is_init = is_init
+
         fs_dir = None
         if templates_dir:
             fs_dir = Path(templates_dir)
             if not fs_dir.is_absolute(): fs_dir = (self.repo / fs_dir)
             fs_dir = fs_dir.resolve()
-            if not fs_dir.is_dir(): raise FileNotFoundError(f"templates_dir not found: {fs_dir}")
 
-        self.tmpl_src = TemplateSource(fs_dir=fs_dir, pkg_rel=None if fs_dir else "templates")
+        base_dir = None
+        if base_templates_dir:
+            base_dir = Path(base_templates_dir)
+            if not base_dir.is_absolute(): base_dir = (self.repo / base_dir)
+            base_dir = base_dir.resolve()
+
+        # The magic happens here: the overlay and the base are unified!
+        self.tmpl_src = TemplateSource(fs_dir=fs_dir, base_dir=base_dir, pkg_rel="templates")
         self.enabled_packages: set[str] = set()
         self.package_patterns: dict[str, list[str]] = {}
 
@@ -474,7 +480,7 @@ class ConfigReader:
                 nm = self.project_name or local_data.get("project_name") or local_data.get("project_title") or self.repo.name
                 self.cfg["project_name"] = nm
                 self.cfg["project_slug"] = _slug(nm)
-                self.cfg["cmake_project"] = local_data.get("cmake_project") or _snake(nm) or nm
+                self.cfg["project_snake"] = local_data.get("project_snake") or _snake(nm) or nm
                 self.cfg["project_camel"] = local_data.get("project_camel") or _camel(nm)
 
                 self.cfg.setdefault("libraries", {})
@@ -482,7 +488,7 @@ class ConfigReader:
                 lib_entry["name"] = nm
                 self.cfg["libraries"][self.cfg["project_slug"]] = lib_entry
 
-                # Fallback registry for backward compatibility with aliases like andy-curtis/a-map-reduce-library
+                # Fallback registry for backward compatibility with aliases
                 profile_ns = local_data.get("profile", "").split("/")[0]
                 if profile_ns:
                     self.cfg["libraries"][_slug(f"{profile_ns}/{nm}")] = lib_entry
@@ -518,16 +524,24 @@ class ConfigReader:
         for it in items:
             ctx = self._build_ctx_inherited(it["context"])
             new_text = self._render_with_help(env, it, ctx)
-            target = self.repo / it["dest"]
+
+            # --- THE FIX: Render the destination path through Jinja! ---
+            try:
+                rendered_dest = env.from_string(it["dest"]).render(**ctx)
+            except Exception:
+                rendered_dest = it["dest"]
+
+            target = self.repo / rendered_dest
             old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
             hm_meta = it.get("header_managed")
-            header_managed = _header_managed_default(it["dest"]) if hm_meta is None else bool(hm_meta)
+            header_managed = _header_managed_default(rendered_dest) if hm_meta is None else bool(hm_meta)
             cmp_new = _normalize_for_cmp(new_text, target, header_managed)
             cmp_old = _normalize_for_cmp(old_text, target, header_managed)
             status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
-            diff_text = _diff(old_text.encode("utf-8"), new_text.encode("utf-8"), it["dest"]) if show_diffs and status in ("create", "update") else ""
+            diff_text = _diff(old_text.encode("utf-8"), new_text.encode("utf-8"), rendered_dest) if show_diffs and status in ("create", "update") else ""
             is_exec = it.get("executable", False)
-            plan.append(PlanItem("jinja", it["dest"], status, it.get("updatable", True), diff_text, new_text.encode("utf-8"), _sha256(it["inline_template"].encode("utf-8")), it["context"], header_managed, is_exec))
+            plan.append(PlanItem("jinja", rendered_dest, status, it.get("updatable", True), diff_text, new_text.encode("utf-8"), _sha256(it["inline_template"].encode("utf-8")), it["context"], header_managed, is_exec))
+
         plan.extend(self._plan_apps_resources(show_diffs=show_diffs))
         return plan
 
@@ -590,9 +604,22 @@ class ConfigReader:
         if not self.cfg.get("project_name"): self.cfg["project_name"] = picked.get("name") or proj_base
 
     def _normalize_keys_autofill(self) -> None:
-        cm = dict(self.cfg.get("cmake") or {})
+        # --- NEW: Normalize root stack shorthand (e.g., stack: "c/cmake") ---
+        raw_stack = str(self.cfg.get("stack") or "").strip()
+        if "/" in raw_stack:
+            st, st_type = raw_stack.split("/", 1)
+            self.cfg["stack"] = st.lower()
+            if not self.cfg.get("stack_type"):
+                self.cfg["stack_type"] = st_type.lower()
+        elif raw_stack:
+            self.cfg["stack"] = raw_stack.lower()
+
+        if not self.cfg.get("stack_type"):
+            self.cfg["stack_type"] = "base"
+
+        dp = dict(self.cfg.get("deps") or {})
         ts = dict(self.cfg.get("tests") or {})
-        lib_srcs = self.cfg.get("library_sources") or cm.get("sources")
+        lib_srcs = self.cfg.get("library_sources") or dp.get("sources")
         if not lib_srcs:
             exts = {".c", ".cc"}
             src_root = self.repo / "src"
@@ -600,7 +627,7 @@ class ConfigReader:
             if auto: lib_srcs = sorted(auto)
 
         norm_srcs = [str(s) for s in (lib_srcs if isinstance(lib_srcs, (list, tuple)) else [lib_srcs])] if lib_srcs else []
-        self.cfg["library_sources"] = cm["sources"] = norm_srcs
+        self.cfg["library_sources"] = dp["sources"] = norm_srcs
 
         test_tgts = self.cfg.get("test_targets") or ts.get("test_targets") or ts.get("targets")
         if not test_tgts:
@@ -610,7 +637,98 @@ class ConfigReader:
             test_tgts = sorted(auto, key=lambda t: t["name"]) if auto else []
 
         ts["targets"] = test_tgts or []
-        self.cfg["cmake"], self.cfg["tests"] = cm, ts
+        self.cfg["deps"], self.cfg["tests"] = dp, ts
+
+    def _build_ctx_inherited(self, key: str | None) -> dict:
+        ctx = _deep_merge(self._base_from_cfg(self.cfg), {} if not key or key == "." else (self.cfg.get(key) or {}))
+        ctx.setdefault("project_name", self.cfg.get("project_name") or "project")
+        ctx.setdefault("project_slug", _slug(ctx.get("project_name", "project")))
+        ctx.setdefault("project_snake", _snake(ctx["project_slug"]))
+        ctx.setdefault("project_camel", _camel(ctx.get("project_name", "project")))
+        ctx.setdefault("project_title", ctx.get("project_title", ctx.get("project_name")))
+        ctx.setdefault("year", str(self.cfg.get("date") or ctx.get("date") or "")[:4] if len(str(self.cfg.get("date") or ctx.get("date") or "")) >= 4 else "2025")
+        ctx.setdefault("version", str(self.cfg.get("version") or "0.1.0"))
+
+        stack = self.cfg.get("stack", "generic")
+        stack_type = self.cfg.get("stack_type", "")
+        ctx.setdefault("stack", stack)
+        ctx.setdefault("stack_type", stack_type)
+
+        scoped_key = f"{stack}_{stack_type}".strip("_").lower()
+        if scoped_key in self.cfg:
+            ctx = _deep_merge(ctx, self.cfg[scoped_key])
+
+        ctx.setdefault("deps", self.cfg.get("deps") or {})
+        ctx.setdefault("tests", self.cfg.get("tests") or {})
+        ctx.setdefault("test_targets", (self.cfg.get("tests") or {}).get("test_targets") or (self.cfg.get("tests") or {}).get("targets") or [])
+        return ctx
+
+    def _plan_apps_resources(self, *, show_diffs: bool) -> list[PlanItem]:
+        apps = self.cfg.get("apps") or {}
+        contexts = [k for k in apps.keys() if k != "context"]
+        if not contexts: return []
+        all_app_resources = [(rel, data, is_j2, origin) for rel, data, is_j2, origin in self.tmpl_src.iter_files() if rel.startswith("app-resources/") and not rel.endswith("/")]
+        if not all_app_resources: return []
+
+        env, plan, base = self._jinja_env_for_inline(), [], self._build_ctx_inherited("deps")
+        for ctx_name in contexts:
+            ctx = dict(apps.get(ctx_name) or {})
+            dest_dir = ctx.get("_apps_dest_dir") or self._compute_app_dest_dir(str((apps.get("context") or {}).get("dest") or "apps"), ctx.get("dest"), ctx_name)
+            rctx = _deep_merge(base, ctx)
+
+            # --- Shorthand splitting for Apps ---
+            raw_stack = str(ctx.get("stack") or self.cfg.get("stack", "")).strip()
+            raw_type = str(ctx.get("stack_type") or self.cfg.get("stack_type", "")).strip()
+
+            if "/" in raw_stack:
+                app_stack, derived_type = raw_stack.split("/", 1)
+                app_stack = app_stack.lower()
+                app_stack_type = raw_type.lower() or derived_type.lower()
+            else:
+                app_stack = raw_stack.lower()
+                app_stack_type = raw_type.lower()
+
+            if not app_stack_type:
+                app_stack_type = raw_type.lower() or "base"
+
+            active_prefix = f"app-resources/{app_stack}/{app_stack_type}/" if app_stack and app_stack_type else None
+            global_prefix = "app-resources/global/"
+
+            rctx.setdefault("project_name", self.cfg.get("project_name") or "project")
+            rctx.setdefault("project_slug", _slug(rctx["project_name"]))
+            rctx.setdefault("project_snake", _snake(rctx["project_slug"]))
+
+            app_scoped_key = f"{app_stack}_{app_stack_type}".strip("_").lower()
+            if app_scoped_key in self.cfg:
+                rctx = _deep_merge(rctx, self.cfg[app_scoped_key])
+
+            rctx.setdefault("app_project_name", f"{base.get('project_name','project')}_{ctx_name}")
+            rctx.setdefault("app_stack", app_stack)
+            rctx.setdefault("app_stack_type", app_stack_type)
+
+            for rel, data, is_j2, origin in all_app_resources:
+                root_prefix = active_prefix if active_prefix and rel.startswith(active_prefix) else (global_prefix if rel.startswith(global_prefix) else None)
+                if not root_prefix: continue
+                sub_rel = rel[len(root_prefix):]
+                dest_rel = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
+                target = self.repo / dest_rel
+
+                if is_j2:
+                    raw_tpl = data.decode("utf-8", errors="replace")
+                    try: new_bytes = env.from_string(raw_tpl).render(**rctx).encode("utf-8")
+                    except Exception as e: raise RuntimeError(f"Jinja render error in apps resource '{rel}' → '{dest_rel}': {e}") from e
+                    tmpl_sha = _sha256(raw_tpl.encode("utf-8"))
+                else: new_bytes, tmpl_sha = data, _sha256(data)
+
+                old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+                hm = _header_managed_default(dest_rel)
+                cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
+                status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
+                diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
+                is_exec = False
+                if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): is_exec = os.access(src_path, os.X_OK)
+                plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, True, diff_text, new_bytes, tmpl_sha, f"apps.{ctx_name}", hm, is_exec))
+        return plan
 
     def _expand_library_templates(self) -> None:
         templates = self.cfg.get("library_templates") or {}
@@ -644,9 +762,9 @@ class ConfigReader:
             nm = str(merged.get("name") or posixpath.basename(str(key))).strip()
             derived = {
                 "slug": _slug(nm), "snake": _snake(nm), "camel": _camel(nm),
-                "cmake_project": _snake(nm) or nm, "project_slug": _slug(nm), "project_camel": _camel(nm),
+                "project_snake": _snake(nm) or nm, "project_slug": _slug(nm), "project_camel": _camel(nm),
             }
-            if "project_name" not in merged: derived["project_name"] = derived["cmake_project"]
+            if "project_name" not in merged: derived["project_name"] = derived["project_snake"]
 
             ctx = {**self.cfg, **derived, **merged}
             def render_any(obj):
@@ -791,14 +909,14 @@ class ConfigReader:
 
         if proj_slug in idx:
             direct = idx[proj_slug]["depends"]
-            cm = dict(self.cfg.get("cmake") or {})
+            dp = dict(self.cfg.get("deps") or {})
 
             if direct:
-                cm.setdefault("find_packages", _dedupe([fp for d in direct for fp in (idx[d].get("finds") or []) if fp]))
-                if not cm.get("pkg_config_deps"):
-                    cm["pkg_config_deps"] = [{"module": m, "target": t} for m, t in {mod: idx[d]["snake"] for d in direct for mod in (idx[d].get("pkg_configs") or [])}.items()]
-                cm.setdefault("link_libraries", _dedupe([lk for d in direct for lk in idx[d]["links"]]))
-                cm.setdefault("deps_for_config", _dedupe([fp.strip().split()[0] for d in direct for fp in (idx[d].get("finds") or []) if fp.strip()]))
+                dp.setdefault("find_packages", _dedupe([fp for d in direct for fp in (idx[d].get("finds") or []) if fp]))
+                if not dp.get("pkg_config_deps"):
+                    dp["pkg_config_deps"] = [{"module": m, "target": t} for m, t in {mod: idx[d]["snake"] for d in direct for mod in (idx[d].get("pkg_configs") or [])}.items()]
+                dp.setdefault("link_libraries", _dedupe([lk for d in direct for lk in idx[d]["links"]]))
+                dp.setdefault("deps_for_config", _dedupe([fp.strip().split()[0] for d in direct for fp in (idx[d].get("finds") or []) if fp.strip()]))
 
             all_roots = [proj_slug]
 
@@ -813,10 +931,12 @@ class ConfigReader:
 
             apps_cfg = self.cfg.get("apps") or {}
             if isinstance(apps_cfg, dict):
+                app_ctx = apps_cfg.get("context", {})
+                if isinstance(app_ctx, dict): # TYPE SAFETY FIX
+                    all_roots.extend(self._resolve_dep_names_to_lib_slugs(_coerce_list(app_ctx.get("depends_on", [])), idx))
+
                 for app_name, app_cfg in apps_cfg.items():
                     if app_name == "context":
-                        if isinstance(app_cfg, dict): # TYPE SAFETY FIX
-                            all_roots.extend(self._resolve_dep_names_to_lib_slugs(_coerce_list(app_cfg.get("depends_on", [])), idx))
                         continue
                     if isinstance(app_cfg, dict):
                         app_deps = _coerce_list(app_cfg.get("depends_on", []))
@@ -831,7 +951,7 @@ class ConfigReader:
             if proj_slug in all_transitive:
                 all_transitive.remove(proj_slug)
 
-            cm["libraries"] = [idx[s]["item"] for s in self._toposort_subset(idx, set(all_transitive))]
+            dp["libraries"] = [idx[s]["item"] for s in self._toposort_subset(idx, set(all_transitive))]
 
             apt_pkgs = []
             for s in set(all_transitive):
@@ -839,9 +959,9 @@ class ConfigReader:
                 if str(item.get("kind")) == "system" and item.get("pkg"):
                     pkg = item["pkg"]
                     apt_pkgs.extend([str(x) for x in pkg if str(x).strip()] if isinstance(pkg, (list, tuple)) else [str(pkg)])
-            cm["apt_packages"] = _dedupe([p for p in apt_pkgs if p and str(p).lower() not in ("none", "null")])
+            dp["apt_packages"] = _dedupe([p for p in apt_pkgs if p and str(p).lower() not in ("none", "null")])
 
-            self.cfg["cmake"] = cm
+            self.cfg["deps"] = dp
 
         self.cfg = self._augment_tests_cfg(self.cfg, idx, proj_slug)
         self.cfg = self._normalize_apps_cfg(self.cfg, idx, proj_slug)
@@ -852,12 +972,13 @@ class ConfigReader:
             elif constraint is True: dev_pkgs.append(str(pkg))
             else: dev_pkgs.append(f"{pkg}{str(constraint).strip()}" if str(constraint).strip() and str(constraint).strip()[0] in "=<>~" else f"{pkg}={str(constraint).strip()}")
         if dev_pkgs:
-            cm = dict(self.cfg.get("cmake") or {})
-            cm["apt_dev_packages"] = _dedupe([p for p in dev_pkgs if p.strip()])
-            self.cfg["cmake"] = cm
-        cm = dict(self.cfg.get("cmake") or {})
-        for k in ["sources", "libraries", "deps_for_config", "apt_packages", "apt_dev_packages", "find_packages", "pkg_config_deps", "link_libraries", "depends_on"]: cm.setdefault(k, [])
-        self.cfg["cmake"] = cm
+            dp = dict(self.cfg.get("deps") or {})
+            dp["apt_dev_packages"] = _dedupe([p for p in dev_pkgs if p.strip()])
+            self.cfg["deps"] = dp
+
+        dp = dict(self.cfg.get("deps") or {})
+        for k in ["sources", "libraries", "deps_for_config", "apt_packages", "apt_dev_packages", "find_packages", "pkg_config_deps", "link_libraries", "depends_on"]: dp.setdefault(k, [])
+        self.cfg["deps"] = dp
 
     def _collect_transitive(self, idx: dict[str, dict], roots: Iterable[str], *, exclude_roots=False) -> list[str]:
         roots = [r for r in roots if r in idx]
@@ -1043,12 +1164,30 @@ class ConfigReader:
         matched = {pkg for pkg, pats in self.package_patterns.items() for pat in pats if fnmatch.fnmatch(rel, pat)}
         return bool(matched) and not any(pkg in self.enabled_packages for pkg in matched)
 
+        # --- THE FIX: Hard boundary for the stacks/ directory ---
+    def _is_valid_stack_rel(self, rel: str) -> bool:
+        if not rel.startswith("stacks/"): return True
+        stack = self.cfg.get("stack")
+        if not stack: return False
+        stack_type = self.cfg.get("stack_type")
+        if stack_type and rel.startswith(f"stacks/{stack}/{stack_type}/"): return True
+        if rel.startswith(f"stacks/{stack}/base/"): return True
+        return False
+
     def _discover_jinja_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
             if not is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+
+            # --- THE FIX: Drop foreign stacks ---
+            if not self._is_valid_stack_rel(rel): continue
+
             text = data.decode("utf-8", errors="replace")
             meta, inline_template = _extract_annotation(text)
+
+            if (meta or {}).get("on_init") and not self.is_init:
+                continue
+
             dest = (meta or {}).get("dest") or self._strip_package_prefix(rel)[:-3]
             if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
             executable = False
@@ -1060,6 +1199,10 @@ class ConfigReader:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
             if is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+
+            # --- THE FIX: Drop foreign stacks ---
+            if not self._is_valid_stack_rel(rel): continue
+
             dest = self._strip_package_prefix(rel)
             if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
             executable = False
@@ -1085,63 +1228,4 @@ class ConfigReader:
             raise RuntimeError(f"Jinja render error in template '{it['rel']}' → output '{it['dest']}':\n{e}\n{frame}") from e
 
     def _base_from_cfg(self, cfg: dict) -> dict:
-        return {k: v for k, v in cfg.items() if k not in ("cmake", "tests", "files", "template_packages", "packages", "templates_dir")}
-
-    def _build_ctx_inherited(self, key: str | None) -> dict:
-        ctx = _deep_merge(self._base_from_cfg(self.cfg), {} if not key or key == "." else (self.cfg.get(key) or {}))
-        ctx.setdefault("project_name", self.cfg.get("project_name") or "project")
-        ctx.setdefault("project_slug", _slug(ctx.get("project_name", "project")))
-        ctx.setdefault("cmake_project", _snake(ctx["project_slug"]))
-        ctx.setdefault("project_camel", _camel(ctx.get("project_name", "project")))
-        ctx.setdefault("project_title", ctx.get("project_title", ctx.get("project_name")))
-        ctx.setdefault("year", str(self.cfg.get("date") or ctx.get("date") or "")[:4] if len(str(self.cfg.get("date") or ctx.get("date") or "")) >= 4 else "2025")
-        ctx.setdefault("cmake", self.cfg.get("cmake") or {})
-        ctx.setdefault("tests", self.cfg.get("tests") or {})
-        ctx.setdefault("test_targets", (self.cfg.get("tests") or {}).get("test_targets") or (self.cfg.get("tests") or {}).get("targets") or [])
-        return ctx
-
-    def _plan_apps_resources(self, *, show_diffs: bool) -> list[PlanItem]:
-        apps = self.cfg.get("apps") or {}
-        contexts = [k for k in apps.keys() if k != "context"]
-        if not contexts: return []
-        all_app_resources = [(rel, data, is_j2, origin) for rel, data, is_j2, origin in self.tmpl_src.iter_files() if rel.startswith("app-resources/") and not rel.endswith("/")]
-        if not all_app_resources: return []
-
-        env, plan, base = self._jinja_env_for_inline(), [], self._build_ctx_inherited("cmake")
-        for ctx_name in contexts:
-            ctx = dict(apps.get(ctx_name) or {})
-            dest_dir = ctx.get("_apps_dest_dir") or self._compute_app_dest_dir(str((apps.get("context") or {}).get("dest") or "apps"), ctx.get("dest"), ctx_name)
-            rctx = _deep_merge(base, ctx)
-            app_flavor = ctx.get("flavor") or ctx.get("app_flavor") or self.cfg.get("repo_flavor")
-            active_prefix, global_prefix = f"app-resources/{app_flavor}/" if app_flavor else None, "app-resources/global/"
-
-            rctx.setdefault("project_name", self.cfg.get("project_name") or "project")
-            rctx.setdefault("project_slug", _slug(rctx["project_name"]))
-            rctx.setdefault("cmake_project", _snake(rctx["project_slug"]))
-            rctx.setdefault("language", self.cfg.get("language", "C"))
-            rctx.setdefault("app_project_name", f"{base.get('project_name','project')}_{ctx_name}")
-            rctx.setdefault("app_languages", base.get("language", "C"))
-
-            for rel, data, is_j2, origin in all_app_resources:
-                root_prefix = active_prefix if active_prefix and rel.startswith(active_prefix) else (global_prefix if rel.startswith(global_prefix) else None)
-                if not root_prefix: continue
-                sub_rel = rel[len(root_prefix):]
-                dest_rel = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
-                target = self.repo / dest_rel
-
-                if is_j2:
-                    raw_tpl = data.decode("utf-8", errors="replace")
-                    try: new_bytes = env.from_string(raw_tpl).render(**rctx).encode("utf-8")
-                    except Exception as e: raise RuntimeError(f"Jinja render error in apps resource '{rel}' → '{dest_rel}': {e}") from e
-                    tmpl_sha = _sha256(raw_tpl.encode("utf-8"))
-                else: new_bytes, tmpl_sha = data, _sha256(data)
-
-                old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
-                hm = _header_managed_default(dest_rel)
-                cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
-                status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
-                diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
-                is_exec = False
-                if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): is_exec = os.access(src_path, os.X_OK)
-                plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, True, diff_text, new_bytes, tmpl_sha, f"apps.{ctx_name}", hm, is_exec))
-        return plan
+        return {k: v for k, v in cfg.items() if k not in ("deps", "tests", "files", "template_packages", "packages", "templates_dir")}

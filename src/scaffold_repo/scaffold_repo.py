@@ -224,6 +224,126 @@ def _print_text_result(res: dict[str, Any]) -> None:
         kind = it.get("type", "issue")
         print(f"- {kind}: {it['file']}" if "file" in it else f"- {kind}: {it.get('message', '')}")
 
+def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg: dict) -> int:
+    import yaml
+    from .scaffoldrc import _interactive_select, append_stack_to_workspace
+    from jinja2 import Environment
+    jenv = Environment()
+
+    print(f"\n\033[1m=== Creating New Project: {slug} ===\033[0m\n")
+
+    stacks = []
+    if (tmpl_dir / "stacks").is_dir():
+        stacks = sorted([d.name for d in (tmpl_dir / "stacks").iterdir() if d.is_dir() and not d.name.startswith(".")])
+
+    if not stacks:
+        print("❌ No stacks found in templates/stacks/.")
+        return 1
+
+    stack_idx = _interactive_select("Select primary stack:", stacks)
+    selected_stack = stacks[stack_idx]
+
+    types = []
+    if (tmpl_dir / "stacks" / selected_stack).is_dir():
+        types = sorted([d.name for d in (tmpl_dir / "stacks" / selected_stack).iterdir() if d.is_dir() and not d.name.startswith(".") and d.name != "base"])
+
+    selected_type = "base"
+    if types:
+        if len(types) == 1:
+            selected_type = types[0]
+            print(f"Select {selected_stack} environment: \033[96m{selected_type}\033[0m (Auto-selected)")
+        else:
+            type_idx = _interactive_select(f"Select {selected_stack} environment:", types)
+            selected_type = types[type_idx]
+
+    # --- 1. Ensure Workspace has this stack configured ---
+    ns_key = f"{selected_stack}_{selected_type}".lower()
+    if ns_key not in existing_cfg:
+        existing_cfg = append_stack_to_workspace(selected_stack, selected_type, workspace_dir, tmpl_dir, existing_cfg)
+
+    # --- 2. Run Project-Level `create_prompts` ---
+    answers = {}
+    defaults_file = tmpl_dir / "stacks" / selected_stack / selected_type / ".scaffold-defaults.yaml"
+    if defaults_file.exists():
+        try:
+            data = yaml.safe_load(defaults_file.read_text(encoding="utf-8")) or {}
+            create_prompts = data.get("create_prompts", [])
+            for p in create_prompts:
+                var_name = p.get("var")
+                prompt_str = p.get("prompt", f"Set {var_name}:")
+                def_val = p.get("default", "")
+                options = p.get("options", [])
+
+                if options:
+                    if len(options) == 1 and "Custom" not in options[0]:
+                        answers[var_name] = options[0]
+                        print(f"{prompt_str} \033[96m{options[0]}\033[0m (Auto-selected)")
+                    else:
+                        start_idx = options.index(def_val) if def_val in options else 0
+                        ans_idx = _interactive_select(prompt_str, options, default_idx=start_idx)
+                        ans = options[ans_idx]
+                        if "Custom" in ans:
+                            answers[var_name] = input(f"  > Enter {var_name} [\033[92m{def_val}\033[0m]: ").strip() or def_val
+                        else:
+                            answers[var_name] = ans
+                else:
+                    answers[var_name] = input(f"{prompt_str} [\033[92m{def_val}\033[0m]: ").strip() or def_val
+        except Exception as e:
+            print(f"Warning: Could not parse create_prompts: {e}")
+
+    profiles = []
+    if (tmpl_dir / "profiles").is_dir():
+        for f in (tmpl_dir / "profiles").rglob("*.yaml"):
+            profiles.append(f.relative_to(tmpl_dir / "profiles").with_suffix("").as_posix())
+    profiles.sort()
+
+    selected_profile = None
+    if profiles:
+        if len(profiles) == 1:
+            selected_profile = profiles[0]
+            print(f"Select project profile: \033[96m{selected_profile}\033[0m (Auto-selected)")
+        else:
+            prof_idx = _interactive_select("Select project profile:", profiles)
+            selected_profile = profiles[prof_idx]
+
+    # --- 3. Write scaffold.yaml ---
+    project_dir = workspace_dir / slug
+    if project_dir.exists() and (project_dir / "scaffold.yaml").exists():
+        print(f"⚠️  Project {slug} already exists.")
+        return 1
+
+    project_dir.mkdir(parents=True, exist_ok=True)
+    scaffold_file = project_dir / "scaffold.yaml"
+    subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
+
+    manifest = {
+        "project_name": slug,
+        "version": "0.1.0",
+        "description": f"A dynamically scaffolded {selected_stack}/{selected_type} project",
+        "stack": f"{selected_stack}/{selected_type}",
+    }
+
+    # Inject the profile into the manifest!
+    if selected_profile:
+        manifest["profile"] = selected_profile
+
+    manifest.update(answers)
+
+    # --- THE FIX: Inject educational comments into the generated YAML ---
+    yaml_str = yaml.dump(manifest, sort_keys=False)
+    help_text = (
+        "\n# NOTE: 'depends_on' is ONLY for internal/source-built monorepo dependencies.\n"
+        "# Standard package manager dependencies (PyPI, npm, etc.) should go in their\n"
+        "# respective config files (pyproject.toml, package.json, etc.).\n"
+        "depends_on: []\n"
+    )
+    yaml_str += help_text
+
+    scaffold_file.write_text(yaml_str, encoding="utf-8")
+    print(f"✅ Initialized {slug}/scaffold.yaml")
+
+    return 0
+
 # --- MAIN EXECUTION ---
 
 def main(argv: list[str] | None = None) -> int:
@@ -241,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     grp_ws.add_argument("--start-feature", nargs="?", const="", metavar="NAME", help="Start a feature branch")
 
     grp_sc = ap.add_argument_group("Scaffolding Options")
+    grp_sc.add_argument("--create", metavar="SLUG", help="Create a new project in the workspace")
     grp_sc.add_argument("--update", action="store_true", help="Explicitly apply template updates to the repositories")
     grp_sc.add_argument("--diff", action="store_true", help="Print unpaginated Git diffs")
     grp_sc.add_argument("-y", "--assume-yes", action="store_true", help="Apply template updates without prompting")
@@ -273,21 +394,46 @@ def main(argv: list[str] | None = None) -> int:
     # Resolve Workspace & Templates
     rc = find_scaffoldrc(root)
     rc_scaffold_dir = rc.get("scaffold_dir")
+    reg_url = rc.get("template_registry_url")
+    reg_ref = rc.get("template_registry_ref", "")
 
     tmpl_dir = args.templates_dir.resolve() if args.templates_dir else None
     if not tmpl_dir:
-        if (root / "templates").is_dir():
+        if reg_url:
+            from .scaffoldrc import _sync_registry
+            try:
+                cache_dir = _sync_registry(reg_url, reg_ref)
+                tmpl_dir = cache_dir / "templates" if (cache_dir / "templates").is_dir() else cache_dir
+            except Exception as e:
+                print(f"Warning: Could not sync remote registry '{reg_url}': {e}", file=sys.stderr)
+        elif (root / "templates").is_dir():
             tmpl_dir = root / "templates"
         elif rc_scaffold_dir and (Path(rc_scaffold_dir) / "templates").is_dir():
             tmpl_dir = Path(rc_scaffold_dir) / "templates"
 
-    # Auto-Detect Target Project
-    project_tokens = args.projects
-    if not project_tokens and not args.diff:
-        active_proj = _get_active_git_project(root)
-        if active_proj:
-            print(f"🎯 Auto-detected context: \033[96m{active_proj}\033[0m")
-            project_tokens = [active_proj]
+
+    # --- RESOLVE WORKSPACE PATH EARLY FOR --CREATE ---
+    ws_str = rc.get("workspace_dir") or "../repos"
+    workspace_dir = Path(ws_str).expanduser()
+    if not workspace_dir.is_absolute():
+        workspace_dir = (root / workspace_dir).resolve()
+
+    is_create_run = False                   # <-- Track it
+    if args.create:
+        code = create_project(args.create, workspace_dir, tmpl_dir, rc)
+        if code != 0: return code
+
+        project_tokens = [args.create]
+        args.update = True
+        is_create_run = True                # <-- Set to True
+    else:
+        # Standard flow
+        project_tokens = args.projects
+        if not project_tokens and not args.diff:
+            active_proj = _get_active_git_project(root)
+            if active_proj:
+                print(f"🎯 Auto-detected context: \033[96m{active_proj}\033[0m")
+                project_tokens = [active_proj]
 
     results: list[dict[str, Any]] = []
     exit_code = 0
@@ -327,7 +473,10 @@ def main(argv: list[str] | None = None) -> int:
                 expanded_tokens.append(p)
         # ---------------------------
 
-        targets = _resolve_projects(reader, expanded_tokens) if expanded_tokens else []
+        if is_create_run:
+            targets = [(args.create, _slug(args.create), args.create, {})]
+        else:
+            targets = _resolve_projects(reader, expanded_tokens) if expanded_tokens else []
 
         # --- SAFETY RAIL: Abort if targets couldn't be resolved ---
         if project_tokens and not targets:
@@ -450,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
                     dest, fix_licenses=True, no_prompt=args.no_prompt, project_name=name,
                     templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
                     assume_yes=args.assume_yes, show_diffs=args.show_diffs,
+                    is_init=is_create_run
                 )
                 exit_code = max(exit_code, code)
                 results.append(res)
@@ -460,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                     root, fix_licenses=True, no_prompt=args.no_prompt, project_name=None,
                     templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
                     assume_yes=args.assume_yes, show_diffs=args.show_diffs,
+                    is_init=is_create_run
                 )
                 exit_code = max(exit_code, code)
                 results.append(res)

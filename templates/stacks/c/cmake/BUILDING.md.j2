@@ -20,13 +20,13 @@ cmake --build . -j"$(nproc || sysctl -n hw.ncpu || echo 4)"
 sudo cmake --install .
 ```
 
-{% set libs = cmake.get('libraries', []) if cmake is mapping else [] %}
-{% set apt_pkgs = cmake.get('apt_packages', []) if cmake is mapping else [] %}
-{% set apt_dev = cmake.get('apt_dev_packages', []) if cmake is mapping else [] %}
+{% set libs = deps.get('libraries', []) if deps is mapping else [] %}
+{% set apt_pkgs = deps.get('apt_packages', []) if deps is mapping else [] %}
+{% set apt_dev = deps.get('apt_dev_packages', []) if deps is mapping else [] %}
 
 {% if libs %}
 
-## Install dependencies (from `cmake.libraries`)
+## Install dependencies (from `deps.libraries`)
 
 {% if apt_pkgs and apt_pkgs|length %}
 

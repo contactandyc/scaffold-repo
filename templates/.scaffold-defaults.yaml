@@ -10,23 +10,28 @@ branch_prefixes:
 # ── OSS Engine Routing ──
 packages:
   base: true
-  flavor: true
+  stack: true
   changie: false
   site: false
-  docs: false
 
 template_packages:
   base:
     - base/**
-  flavor:
-    - flavors/{{ repo_flavor }}/**
+  stack:
+    - stacks/{{ stack }}/base/**
+    - stacks/{{ stack }}/{{ stack_type }}/**
   changie:
     - mixins/changie/**
   site:
     - mixins/jekyll-site/**
-  docs:
-    - mixins/markdown-docs/**
   resources:
     - resources/**
     - scaffold-repo.yaml
     - aliases.yaml
+
+# ── Dynamic Init Prompts ──
+init_prompts:
+  - var: stack
+    prompt: "Select primary stack:"
+    choices_from_dir: "stacks"
+    multiselect: true

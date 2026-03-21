@@ -1,0 +1,12 @@
+# --- WORKSPACE LEVEL (Asked during --init or if the stack is missing) ---
+init_prompts:
+  - var: PYTHON_VERSION
+    prompt: "Target Python version for the workspace:"
+    default: "3.11"
+
+# --- PROJECT LEVEL (Asked during --create <slug>) ---
+create_prompts:
+  - var: is_cli_app
+    prompt: "Is this a CLI Application (requires pipx) or a standard Library?"
+    default: "Library"
+    options: ["CLI Application", "Library"]

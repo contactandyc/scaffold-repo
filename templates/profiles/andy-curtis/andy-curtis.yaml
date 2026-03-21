@@ -18,8 +18,7 @@ contributors:
 
 # Universal Organizational Standards
 date: 2026-03-10
-packages:
-  docs: true
+packages: {}
 
 # Base environment tools every project might need
 dev_packages:
