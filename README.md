@@ -122,7 +122,7 @@ scaffold-repo my-namespace --start-feature "dynamic-resize" -y
 **Step 2: Compile Dependencies & First-Party Code**
 
 ```bash
-scaffold-repo my-namespace --install-deps --install
+scaffold-repo my-namespace --build-deps --build
 
 ```
 

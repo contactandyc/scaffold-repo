@@ -20,7 +20,7 @@ def _run(cmd: list[str] | str, *, cwd: Path | None = None, shell: bool = False) 
 def _ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | None) -> None:
     if not dest.exists():
         cmd = ["git", "clone"]
-        if shallow is None or shallow is True: cmd += ["--depth", "1"]
+        if shallow: cmd += ["--depth", "1"]
         if branch: cmd += ["--branch", branch, "--single-branch"]
         cmd += [url, str(dest)]
         try: _run(cmd)
@@ -38,7 +38,7 @@ def _ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | N
 
     if branch:
         fetch_cmd = ["git", "-C", str(dest), "fetch", "origin", branch]
-        if shallow is None or shallow is True: fetch_cmd += ["--depth", "1"]
+        if shallow: fetch_cmd += ["--depth", "1"]
         try: _run(fetch_cmd)
         except subprocess.CalledProcessError:
             print(f"⚠️  skip {dest.name}: branch/tag {branch} not found")
@@ -66,6 +66,10 @@ def _sanitize_steps(steps: list[str]) -> list[str]:
 def _run_steps_chain(steps: list[str], *, cwd: Path) -> None:
     if not steps: return
 
+    # --- Print a clean, human-readable version to the terminal ---
+    clean_print = " && \\\n  ".join(steps)
+    print(f"$ {clean_print}")
+
     prologue = r"""
         set -Eeuo pipefail
         nproc() { (command -v nproc >/dev/null && command nproc) || (sysctl -n hw.ncpu 2>/dev/null) || (getconf _NPROCESSORS_ONLN 2>/dev/null) || echo 4; }
@@ -88,10 +92,12 @@ def _run_steps_chain(steps: list[str], *, cwd: Path) -> None:
 
     chain = " && \\\n  ".join(steps)
     script = prologue + "\n" + chain + "\n"
-    _run(["bash", "-lc", script], cwd=cwd)
+
+    # --- Bypass _run() so it doesn't double-print the massive script ---
+    subprocess.run(["bash", "-lc", script], cwd=cwd, check=True)
 
 def _normalize_dependency(raw_item) -> dict:
-    norm = {"flavor": "cmake", "url": None, "revision": None, "is_alias": False, "build_args": [], "env": {}, "shallow": True}
+    norm = {"flavor": "cmake", "url": None, "revision": None, "is_alias": False, "build_args": [], "env": {}, "shallow": False}
     if isinstance(raw_item, str):
         s = raw_item.strip()
         if "+" in s and "://" not in s.split("+", 1)[0]:
@@ -114,7 +120,7 @@ def _normalize_dependency(raw_item) -> dict:
         norm["flavor"] = data.get("flavor", "cmake")
         norm["url"] = data.get("url") or data.get("source") or norm["url"]
         norm["revision"] = data.get("revision") or data.get("tag") or data.get("branch")
-        norm["shallow"] = data.get("shallow", True)
+        norm["shallow"] = data.get("shallow", False)
         norm["build_args"] = _coerce_list(data.get("build_args", []))
         norm["env"] = data.get("env", {})
         if norm["url"] and not norm["url"].startswith(("http://", "https://", "git@")):
@@ -162,14 +168,14 @@ def resolve_dependency_graph(
                 dep_url = global_registry[alias_slug]["item"].get("url")
                 dep_name = global_registry[alias_slug]["name"]
                 dep_rev = dep["revision"] or global_registry[alias_slug]["item"].get("branch")
-                dep_shallow = global_registry[alias_slug]["item"].get("shallow", True)
+                dep_shallow = global_registry[alias_slug]["item"].get("shallow", False)
             else:
                 continue
         else:
             dep_url = dep["url"]
             dep_name = dep_url.split("/")[-1].replace(".git", "")
             dep_rev = dep["revision"]
-            dep_shallow = dep.get("shallow", True)
+            dep_shallow = dep.get("shallow", False)
 
         if not dep_url: continue
 
@@ -209,51 +215,72 @@ def _toposort_graph(graph: dict) -> list[str]:
                 queue.append(m)
     return ordered
 
-def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Path, do_install: bool = True) -> None:
+def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Path, do_build: bool = True, do_install: bool = True, do_clean: bool = False) -> None:
     """Centralized execution engine for both 1st-party targets and 3rd-party dependencies."""
 
     if (target_dir / "build.sh").exists():
-        print("  • using local build.sh")
-        cmds = ["./build.sh clean"]
+        print(f"  • using local build.sh (clean={do_clean}, build={do_build}, install={do_install})")
+        cmds = []
+        if do_clean:
+            cmds.append("./build.sh clean")
         if do_install:
             cmds.append("./build.sh install")
-        else:
+        elif do_build:
             cmds.append("./build.sh build")
-        _run_steps_chain(cmds, cwd=target_dir)
+
+        if cmds:
+            _run_steps_chain(cmds, cwd=target_dir)
 
     elif (target_dir / "CMakeLists.txt").exists():
-        print("  • using smart CMake fallback")
-        extra_cmake_args = []
-        raw_steps = _coerce_list(reg_item.get("build_steps", []))
-        for step in raw_steps:
-            if "cmake " in step:
-                args = re.findall(r"-D[^\s]+", step)
-                for a in args:
-                    if not a.startswith("-DCMAKE_INSTALL_PREFIX") and not a.startswith("-DCMAKE_BUILD_TYPE"):
-                        if a not in extra_cmake_args:
-                            extra_cmake_args.append(a)
+        print(f"  • using smart CMake fallback (clean={do_clean}, build={do_build}, install={do_install})")
+        cmds = []
+        if do_clean:
+            cmds.append("rm -rf build")
 
-        args_str = " ".join(extra_cmake_args)
-        cmds = [
-            f'mkdir -p build',
-            f'cd build',
-            f'cmake .. -DCMAKE_BUILD_TYPE=${{BUILD_TYPE:-Release}} -DCMAKE_INSTALL_PREFIX=${{PREFIX:-/usr/local}} {args_str}',
-            f'cmake --build . -j"$(nproc)"'
-        ]
-        if do_install:
-            cmds.append(f'${{SUDO}}cmake --install .')
+        if do_build or do_install:
+            extra_cmake_args = []
+            raw_steps = _coerce_list(reg_item.get("build_steps", []))
+            for step in raw_steps:
+                if "cmake " in step:
+                    args = re.findall(r"-D[^\s]+", step)
+                    for a in args:
+                        if not a.startswith("-DCMAKE_INSTALL_PREFIX") and not a.startswith("-DCMAKE_BUILD_TYPE"):
+                            if a not in extra_cmake_args:
+                                extra_cmake_args.append(a)
 
-        _run_steps_chain(cmds, cwd=target_dir)
+            args_str = " ".join(extra_cmake_args)
+            cmds.extend([
+                f'mkdir -p build',
+                f'cd build',
+                f'cmake .. -DCMAKE_BUILD_TYPE=${{BUILD_TYPE:-Release}} -DCMAKE_INSTALL_PREFIX=${{PREFIX:-/usr/local}} {args_str}',
+                f'cmake --build . -j"$(nproc)"'
+            ])
+            if do_install:
+                cmds.append(f'${{SUDO}}cmake --install .')
+
+        if cmds:
+            _run_steps_chain(cmds, cwd=target_dir)
 
     elif reg_item.get("build_steps"):
-        print("  • using explicit build_steps from registry")
+        print(f"  • using explicit build_steps from registry (clean={do_clean}, build={do_build})")
         raw_steps = _coerce_list(reg_item["build_steps"])
         sanitized = _sanitize_steps(raw_steps)
-        steps = [s.replace("/usr/local", "${PREFIX:-/usr/local}").replace("sudo ", "${SUDO}") for s in sanitized]
-        _run_steps_chain(steps, cwd=target_dir)
+
+        # Filter logic based on flags
+        if not do_build and not do_install:
+            # ONLY keep clean steps
+            sanitized = [s for s in sanitized if "clean" in s or "rm -rf" in s]
+        elif not do_clean:
+            # ONLY keep build steps
+            sanitized = [s for s in sanitized if s.strip() not in ("./build.sh clean", "make clean", "ninja clean") and "rm -rf" not in s]
+
+        if sanitized:
+            steps = [s.replace("/usr/local", "${PREFIX:-/usr/local}").replace("sudo ", "${SUDO}") for s in sanitized]
+            _run_steps_chain(steps, cwd=target_dir)
 
     else:
         print(f"  ⚠️  skip {slug}: no build.sh, CMakeLists.txt, or build_steps found.")
+
 
 def build_all_libs(
         repo: Path,
@@ -263,7 +290,8 @@ def build_all_libs(
         templates_dir: str | None,
         do_clone: bool = True,
         do_build: bool = True,
-        do_install: bool = True
+        do_install: bool = True,
+        do_clean: bool = False
 ) -> None:
     repo = repo.resolve()
     reader = ConfigReader(repo, project_name=None, templates_dir=templates_dir)
@@ -289,7 +317,8 @@ def build_all_libs(
         dep_path = graph[slug]["path"]
         print(f"\n=== Processing Dependency: {slug} ===")
 
-        if not do_build:
+        # If they aren't building AND aren't cleaning, just skip execution
+        if not do_build and not do_clean:
             print(f"✅ fetched: {slug}")
             continue
 
@@ -305,6 +334,6 @@ def build_all_libs(
         if not reg_item:
             reg_item = {}
 
-        execute_build(slug, dep_path, reg_item, workspace_dir, do_install=do_install)
+        execute_build(slug, dep_path, reg_item, workspace_dir, do_build=do_build, do_install=do_install, do_clean=do_clean)
 
         print(f"✅ done: {slug}")

@@ -250,8 +250,10 @@ def main(argv: list[str] | None = None) -> int:
     grp_dp = ap.add_argument_group("Dependency Lifecycle")
     grp_dp.add_argument("--clone-deps", action="store_true", help="Fetch external dependencies")
     grp_dp.add_argument("--build-deps", action="store_true", help="Fetch, compile, and install dependencies")
+    grp_dp.add_argument("--clean-deps", action="store_true", help="Wipe build caches for dependencies")
 
     grp_tl = ap.add_argument_group("Target Lifecycle")
+    grp_tl.add_argument("--clean", action="store_true", help="Run './build.sh clean' on the target")
     grp_tl.add_argument("--build", action="store_true", help="Run './build.sh build'")
     grp_tl.add_argument("--install", action="store_true", help="Run './build.sh install'")
 
@@ -427,14 +429,15 @@ def main(argv: list[str] | None = None) -> int:
                         continue
 
         # --- PHASE 2: Fetch Dependency Graph BEFORE Scaffolding ---
-        target_dirs = [workspace_dir / _slug(posixpath.basename(t[2])) for t in targets] if targets else [root]
-        for t_dir in target_dirs:
-            if t_dir.exists():
-                build_all_libs(
-                    repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
-                    templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
-                    do_clone=True, do_build=False, do_install=False # FETCH ONLY
-                )
+        if not skip_templates or args.clone_deps or args.build_deps or args.clean_deps:
+            target_dirs = [workspace_dir / _slug(posixpath.basename(t[2])) for t in targets] if targets else [root]
+            for t_dir in target_dirs:
+                if t_dir.exists():
+                    build_all_libs(
+                        repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
+                        templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                        do_clone=True, do_build=False, do_install=False, do_clean=False # FETCH ONLY
+                    )
 
         # --- PHASE 3: Scaffolding (Templates now have full visibility) ---
         if targets:
@@ -462,17 +465,20 @@ def main(argv: list[str] | None = None) -> int:
                 results.append(res)
 
         # --- PHASE 4: Build Dependencies ---
-        if args.build_deps:
+        if args.build_deps or args.clean_deps:
             for t_dir in target_dirs:
                 if t_dir.exists():
                     build_all_libs(
                         repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
                         templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
-                        do_clone=False, do_build=args.build_deps, do_install=args.build_deps
+                        do_clone=False,
+                        do_build=args.build_deps,   # Only build if explicitly asked
+                        do_install=args.build_deps, # Only install if explicitly asked
+                        do_clean=args.clean_deps    # Only clean if explicitly asked
                     )
 
         # --- PHASE 5: First-Party Build Orchestration ---
-        if targets and (args.build or args.install):
+        if targets and (args.build or args.install or args.clean):
             print("\n\033[1m=== Phase 5: First-Party Build Orchestration ===\033[0m")
             from .build_libs import execute_build
 
@@ -480,9 +486,13 @@ def main(argv: list[str] | None = None) -> int:
                 dest = workspace_dir / _slug(posixpath.basename(raw_token))
                 if not dest.exists(): continue
 
-                print(f"\n🚀 Orchestrating build for {name}...")
-                # We pass do_install=True if args.install was passed, otherwise False (just build)
-                execute_build(slug, dest, item, workspace_dir, do_install=args.install)
+                print(f"\n🚀 Orchestrating execution for {name}...")
+                execute_build(
+                    slug, dest, item, workspace_dir,
+                    do_build=args.build,
+                    do_install=args.install,
+                    do_clean=args.clean
+                )
 
         # --- PHASE 6: Git Orchestration ---
         if targets and (args.commit or args.publish_feature or args.publish_release or args.drop_feature or args.push):

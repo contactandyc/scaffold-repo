@@ -107,9 +107,15 @@ endif()
 {% endfor %}
 {% endif %}
 
+
 # ── Library variants (ALL are defined & built/installed) ──────────────────────
 {% for variant in ["debug","memory","static","shared"] %}
-add_library({{ cmake_project }}_{{ variant }}
+
+{% if variant == "shared" %}
+add_library({{ cmake_project }}_{{ variant }} SHARED
+{% else %}
+add_library({{ cmake_project }}_{{ variant }} STATIC
+{% endif %}
 {%- for s in sources %}
   {{ s }}
 {%- endfor %}

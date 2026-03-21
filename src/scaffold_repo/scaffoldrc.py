@@ -115,8 +115,16 @@ def init_scaffoldrc() -> int:
             existing_rc_path = global_rc
             print(f"🔍 Found global config at: \033[90m{existing_rc_path}\033[0m\n")
 
-    # 2. Extract existing values or set defaults
-    def_ws = existing_cfg.get("workspace_dir") or str(existing_rc_path.parent if existing_rc_path else Path.home() / "repos")
+    # 2. Extract existing values or set context-aware defaults
+    if existing_cfg.get("workspace_dir"):
+        def_ws = existing_cfg["workspace_dir"]
+    elif (target / "scaffold.yaml").is_file():
+        # Context Aware: User is inside a scaffolded repo. Default to its absolute parent directory.
+        def_ws = str(target.parent)
+        print("🎯 \033[96mDetected scaffold.yaml. Optimizing default workspace to parent directory.\033[0m")
+    else:
+        def_ws = str(existing_rc_path.parent if existing_rc_path else Path.home() / "repos")
+
     def_prefix = existing_cfg.get("prefix") or "/usr/local"
     def_btype = existing_cfg.get("build_type") or "Release"
     def_variant = existing_cfg.get("build_variant") or "static"
