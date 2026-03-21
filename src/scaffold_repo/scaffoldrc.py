@@ -132,6 +132,7 @@ def init_scaffoldrc() -> int:
             print("\n❌ Failed to fetch remote registry. Aborting.")
             return 1
 
+    # --- NEW: Ask for an Overlay Directory ---
     print("")
     ans_overlay = input("Do you want to configure a local templates overlay? (For custom profiles/licenses) [y/N]: ").strip().lower()
     if ans_overlay in ("y", "yes"):
@@ -164,7 +165,6 @@ def init_scaffoldrc() -> int:
             p_list = p.get("__path", [])
             raw_var = p.get("var")
 
-            # Use raw_var directly to check for deduplication (no prefixes!)
             if raw_var in seen_prompt_vars:
                 continue
             seen_prompt_vars.add(raw_var)
@@ -176,7 +176,6 @@ def init_scaffoldrc() -> int:
             is_multi = p.get("multiselect", False)
             prompt_str = p.get("prompt", f"Set {raw_var}:")
 
-            # Dig into the existing YAML config to find defaults based on current path
             ns_key = "_".join(p_list).lower() if p_list else ""
             def_source = existing_cfg.get(ns_key, {}) if ns_key else existing_cfg
             def_val = def_source.get(raw_var.lower()) or p.get("default", "")
@@ -237,7 +236,6 @@ def init_scaffoldrc() -> int:
         print("\nAborted.")
         return 1
 
-    # --- Post-loop: Build the YAML Dict and Scoped Bash Files ---
     yaml_config = {
         "workspace_dir": str(workspace_dir),
     }
@@ -247,12 +245,13 @@ def init_scaffoldrc() -> int:
     else:
         yaml_config["scaffold_dir"] = str(Path(__file__).resolve().parents[2])
 
-    # 1. Store global variables in root of YAML
+    if "template_overlay_dir" in existing_cfg:
+        yaml_config["template_overlay_dir"] = existing_cfg["template_overlay_dir"]
+
     for p_list, raw_var, ans in collected_answers:
         if not p_list:
             yaml_config[raw_var.lower()] = ans
 
-    # 2. Build the scoped Bash files
     all_paths = {tuple(p_list) for p_list, _, _ in collected_answers if p_list}
     leaf_paths = []
     for p1 in all_paths:
@@ -265,7 +264,6 @@ def init_scaffoldrc() -> int:
             leaf_paths.append(p1)
 
     scoped_bash_files = {}
-
     for leaf in leaf_paths:
         leaf_ns = "_".join(leaf).lower()
         leaf_dict = {}
@@ -277,14 +275,10 @@ def init_scaffoldrc() -> int:
                     leaf_dict[raw_var] = val_str
 
         if leaf_dict:
-            # Store in YAML config under the namespace block (e.g. c_cmake: { prefix: ... })
             yaml_config[leaf_ns] = leaf_dict
-
-            # Prepare Bash export strings
             bash_lines = [f'export {k.upper()}="{v}"' for k, v in leaf_dict.items()]
             scoped_bash_files[f".scaffoldrc_{leaf_ns}"] = "\n".join(bash_lines) + "\n"
 
-    # Write files
     workspace_dir.mkdir(parents=True, exist_ok=True)
     yaml_path = workspace_dir / ".scaffoldrc.yaml"
 
@@ -295,10 +289,7 @@ def init_scaffoldrc() -> int:
         except KeyboardInterrupt: return 1
 
     try:
-        # Write Master YAML
         yaml_path.write_text(yaml.dump(yaml_config, sort_keys=False), encoding="utf-8")
-
-        # Write Scoped Bash Files
         for filename, content in scoped_bash_files.items():
             (workspace_dir / filename).write_text(content, encoding="utf-8")
 
@@ -311,8 +302,8 @@ def init_scaffoldrc() -> int:
         print(f"\n❌ Failed to write config: {e}", file=sys.stderr)
         return 1
 
-
-def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg: dict) -> dict:
+# Change signature to accept reader instead of tmpl_dir
+def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, reader, existing_cfg: dict) -> dict:
     import yaml
     import re
     from jinja2 import Environment
@@ -320,12 +311,13 @@ def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, 
 
     print(f"\n⚙️  Configuring Workspace for \033[96m{stack}/{stack_type}\033[0m...")
 
-    defaults_file = tmpl_dir / "stacks" / stack / stack_type / ".scaffold-defaults.yaml"
-    if not defaults_file.exists():
+    # Use the reader to fetch from the virtual filesystem
+    defaults_text = reader.tmpl_src.read_resource_text(f"stacks/{stack}/{stack_type}/.scaffold-defaults.yaml")
+    if not defaults_text:
         return existing_cfg
 
     try:
-        data = yaml.safe_load(defaults_file.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(defaults_text) or {}
         init_prompts = data.get("init_prompts", [])
     except Exception:
         return existing_cfg
@@ -348,11 +340,18 @@ def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, 
         if "choices_from_dir" in p:
             dir_tmpl = p["choices_from_dir"]
             dir_str = jenv.from_string(dir_tmpl).render(**answers).strip()
-            target_dir = tmpl_dir / dir_str
-            if target_dir.is_dir():
-                exclude = p.get("exclude", [])
-                found = sorted([d.name for d in target_dir.iterdir() if d.is_dir() and not d.name.startswith(".")])
-                options.extend([f for f in found if f not in exclude])
+
+            # --- OVERLAY FIX: Search the virtual unified filesystem! ---
+            options_from_dir = set()
+            for rel, _, _, _ in reader.tmpl_src.iter_files():
+                if rel.startswith(f"{dir_str}/"):
+                    parts = rel[len(dir_str)+1:].split("/")
+                    if parts and parts[0] and not parts[0].startswith("."):
+                        options_from_dir.add(parts[0])
+
+            exclude = p.get("exclude", [])
+            found = sorted([f for f in options_from_dir if f not in exclude])
+            options.extend(found)
 
         if def_val == "./install": def_val = str(workspace_dir / "install")
         options = [o if o != "./install" else str(workspace_dir / "install") for o in options]
@@ -379,14 +378,10 @@ def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, 
         val_str = ",".join(ans) if isinstance(ans, list) else str(ans)
         leaf_dict[raw_var] = val_str
 
-    # 1. Update YAML config in memory
     existing_cfg[leaf_ns] = leaf_dict
-
-    # 2. Write updated YAML back to disk
     yaml_path = workspace_dir / ".scaffoldrc.yaml"
     yaml_path.write_text(yaml.dump(existing_cfg, sort_keys=False), encoding="utf-8")
 
-    # 3. Regenerate the scoped bash file for this stack
     bash_lines = [f'export {k.upper()}="{v}"' for k, v in leaf_dict.items()]
     bash_content = "\n".join(bash_lines) + "\n"
     (workspace_dir / f".scaffoldrc_{leaf_ns}").write_text(bash_content, encoding="utf-8")

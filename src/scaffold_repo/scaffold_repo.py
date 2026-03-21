@@ -224,7 +224,8 @@ def _print_text_result(res: dict[str, Any]) -> None:
         kind = it.get("type", "issue")
         print(f"- {kind}: {it['file']}" if "file" in it else f"- {kind}: {it.get('message', '')}")
 
-def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg: dict) -> int:
+# Change signature to accept reader instead of tmpl_dir
+def create_project(slug: str, workspace_dir: Path, reader: ConfigReader, existing_cfg: dict) -> int:
     import yaml
     from .scaffoldrc import _interactive_select, append_stack_to_workspace
     from jinja2 import Environment
@@ -232,9 +233,14 @@ def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg:
 
     print(f"\n\033[1m=== Creating New Project: {slug} ===\033[0m\n")
 
-    stacks = []
-    if (tmpl_dir / "stacks").is_dir():
-        stacks = sorted([d.name for d in (tmpl_dir / "stacks").iterdir() if d.is_dir() and not d.name.startswith(".")])
+    # Use unified filesystem to find stacks
+    stacks = set()
+    for rel, _, _, _ in reader.tmpl_src.iter_files():
+        if rel.startswith("stacks/"):
+            parts = rel.split("/")
+            if len(parts) >= 2 and parts[1] and not parts[1].startswith("."):
+                stacks.add(parts[1])
+    stacks = sorted(list(stacks))
 
     if not stacks:
         print("❌ No stacks found in templates/stacks/.")
@@ -243,9 +249,14 @@ def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg:
     stack_idx = _interactive_select("Select primary stack:", stacks)
     selected_stack = stacks[stack_idx]
 
-    types = []
-    if (tmpl_dir / "stacks" / selected_stack).is_dir():
-        types = sorted([d.name for d in (tmpl_dir / "stacks" / selected_stack).iterdir() if d.is_dir() and not d.name.startswith(".") and d.name != "base"])
+    # Use unified filesystem to find environments
+    types = set()
+    for rel, _, _, _ in reader.tmpl_src.iter_files():
+        if rel.startswith(f"stacks/{selected_stack}/"):
+            parts = rel.split("/")
+            if len(parts) >= 3 and parts[2] != "base" and not parts[2].startswith("."):
+                types.add(parts[2])
+    types = sorted(list(types))
 
     selected_type = "base"
     if types:
@@ -256,17 +267,15 @@ def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg:
             type_idx = _interactive_select(f"Select {selected_stack} environment:", types)
             selected_type = types[type_idx]
 
-    # --- 1. Ensure Workspace has this stack configured ---
     ns_key = f"{selected_stack}_{selected_type}".lower()
     if ns_key not in existing_cfg:
-        existing_cfg = append_stack_to_workspace(selected_stack, selected_type, workspace_dir, tmpl_dir, existing_cfg)
+        existing_cfg = append_stack_to_workspace(selected_stack, selected_type, workspace_dir, reader, existing_cfg)
 
-    # --- 2. Run Project-Level `create_prompts` ---
     answers = {}
-    defaults_file = tmpl_dir / "stacks" / selected_stack / selected_type / ".scaffold-defaults.yaml"
-    if defaults_file.exists():
+    defaults_text = reader.tmpl_src.read_resource_text(f"stacks/{selected_stack}/{selected_type}/.scaffold-defaults.yaml")
+    if defaults_text:
         try:
-            data = yaml.safe_load(defaults_file.read_text(encoding="utf-8")) or {}
+            data = yaml.safe_load(defaults_text) or {}
             create_prompts = data.get("create_prompts", [])
             for p in create_prompts:
                 var_name = p.get("var")
@@ -291,11 +300,12 @@ def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg:
         except Exception as e:
             print(f"Warning: Could not parse create_prompts: {e}")
 
-    profiles = []
-    if (tmpl_dir / "profiles").is_dir():
-        for f in (tmpl_dir / "profiles").rglob("*.yaml"):
-            profiles.append(f.relative_to(tmpl_dir / "profiles").with_suffix("").as_posix())
-    profiles.sort()
+    # Discover profiles abstractly across base AND overlay!
+    profiles = set()
+    for rel, _, _, _ in reader.tmpl_src.iter_files():
+        if rel.startswith("profiles/") and rel.endswith(".yaml"):
+            profiles.add(rel[len("profiles/"): -5])
+    profiles = sorted(list(profiles))
 
     selected_profile = None
     if profiles:
@@ -306,7 +316,6 @@ def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg:
             prof_idx = _interactive_select("Select project profile:", profiles)
             selected_profile = profiles[prof_idx]
 
-    # --- 3. Write scaffold.yaml ---
     project_dir = workspace_dir / slug
     if project_dir.exists() and (project_dir / "scaffold.yaml").exists():
         print(f"⚠️  Project {slug} already exists.")
@@ -323,13 +332,11 @@ def create_project(slug: str, workspace_dir: Path, tmpl_dir: Path, existing_cfg:
         "stack": f"{selected_stack}/{selected_type}",
     }
 
-    # Inject the profile into the manifest!
     if selected_profile:
         manifest["profile"] = selected_profile
 
     manifest.update(answers)
 
-    # --- THE FIX: Inject educational comments into the generated YAML ---
     yaml_str = yaml.dump(manifest, sort_keys=False)
     help_text = (
         "\n# NOTE: 'depends_on' is ONLY for internal/source-built monorepo dependencies.\n"
@@ -396,21 +403,30 @@ def main(argv: list[str] | None = None) -> int:
     rc_scaffold_dir = rc.get("scaffold_dir")
     reg_url = rc.get("template_registry_url")
     reg_ref = rc.get("template_registry_ref", "")
+    overlay_dir_str = rc.get("template_overlay_dir")
 
-    tmpl_dir = args.templates_dir.resolve() if args.templates_dir else None
-    if not tmpl_dir:
-        if reg_url:
-            from .scaffoldrc import _sync_registry
-            try:
-                cache_dir = _sync_registry(reg_url, reg_ref)
-                tmpl_dir = cache_dir / "templates" if (cache_dir / "templates").is_dir() else cache_dir
-            except Exception as e:
-                print(f"Warning: Could not sync remote registry '{reg_url}': {e}", file=sys.stderr)
+    base_tmpl_dir = None
+    if reg_url:
+        from .scaffoldrc import _sync_registry
+        try:
+            cache_dir = _sync_registry(reg_url, reg_ref)
+            base_tmpl_dir = cache_dir / "templates" if (cache_dir / "templates").is_dir() else cache_dir
+        except Exception as e:
+            print(f"Warning: Could not sync remote registry '{reg_url}': {e}", file=sys.stderr)
+    elif rc_scaffold_dir and (Path(rc_scaffold_dir) / "templates").is_dir():
+        base_tmpl_dir = Path(rc_scaffold_dir) / "templates"
+
+    overlay_tmpl_dir = args.templates_dir.resolve() if args.templates_dir else None
+    if not overlay_tmpl_dir:
+        if overlay_dir_str:
+            overlay_tmpl_dir = (root / overlay_dir_str).resolve()
         elif (root / "templates").is_dir():
-            tmpl_dir = root / "templates"
-        elif rc_scaffold_dir and (Path(rc_scaffold_dir) / "templates").is_dir():
-            tmpl_dir = Path(rc_scaffold_dir) / "templates"
+            overlay_tmpl_dir = root / "templates"
 
+    # Fallback logic: If no remote registry is configured, the local templates ARE the base.
+    if not base_tmpl_dir and overlay_tmpl_dir:
+        base_tmpl_dir = overlay_tmpl_dir
+        overlay_tmpl_dir = None
 
     # --- RESOLVE WORKSPACE PATH EARLY FOR --CREATE ---
     ws_str = rc.get("workspace_dir") or "../repos"
@@ -418,14 +434,36 @@ def main(argv: list[str] | None = None) -> int:
     if not workspace_dir.is_absolute():
         workspace_dir = (root / workspace_dir).resolve()
 
-    is_create_run = False                   # <-- Track it
+    # --- INITIALIZE UNIFIED CONFIG READER EARLY ---
+    reader = ConfigReader(
+        root,
+        project_name=None,
+        templates_dir=(overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None),
+        base_templates_dir=(base_tmpl_dir.as_posix() if base_tmpl_dir else None)
+    )
+    reader.load()
+    reader.effective_config["workspace_dir"] = str(workspace_dir)
+
+    is_create_run = False
     if args.create:
-        code = create_project(args.create, workspace_dir, tmpl_dir, rc)
+        code = create_project(args.create, workspace_dir, reader, rc)
         if code != 0: return code
 
         project_tokens = [args.create]
         args.update = True
-        is_create_run = True                # <-- Set to True
+        is_create_run = True
+
+        # We must re-instantiate the reader with the new is_init flag so it executes Day 0 logic!
+        reader = ConfigReader(
+            root,
+            project_name=None,
+            templates_dir=(overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None),
+            base_templates_dir=(base_tmpl_dir.as_posix() if base_tmpl_dir else None),
+            is_init=True
+        )
+        reader.load()
+        reader.effective_config["workspace_dir"] = str(workspace_dir)
+
     else:
         # Standard flow
         project_tokens = args.projects
@@ -439,23 +477,12 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = 0
 
     try:
-        reader = ConfigReader(root, project_name=None, templates_dir=(tmpl_dir.as_posix() if tmpl_dir else None))
-        reader.load()
-
-        # --- PATH FIX: Enforce an absolute workspace path globally ---
-        ws_str = rc.get("workspace_dir") or reader.effective_config.get("workspace_dir", "../repos")
-        workspace_dir = Path(ws_str).expanduser()
-        if not workspace_dir.is_absolute():
-            workspace_dir = (root / workspace_dir).resolve()
-
-        reader.effective_config["workspace_dir"] = str(workspace_dir)
-
         # --- CLI ALIAS EXPANSION ---
         aliases = {}
-        alias_file = tmpl_dir / "resources" / "aliases.yaml" if tmpl_dir else None
-        if alias_file and alias_file.exists():
+        alias_text = reader.tmpl_src.read_resource_text("resources/aliases.yaml")
+        if alias_text:
             try:
-                alias_data = yaml.safe_load(alias_file.read_text(encoding="utf-8")) or {}
+                alias_data = yaml.safe_load(alias_text) or {}
                 if isinstance(alias_data, dict):
                     aliases.update(alias_data)
             except Exception as e:
@@ -584,7 +611,8 @@ def main(argv: list[str] | None = None) -> int:
                 if t_dir.exists():
                     build_all_libs(
                         repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
-                        templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                        templates_dir=overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None,
+                        base_templates_dir=base_tmpl_dir.as_posix() if base_tmpl_dir else None,
                         do_clone=True, do_build=False, do_install=False, do_clean=False # FETCH ONLY
                     )
 
@@ -597,7 +625,8 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 code, res = verify_repo(
                     dest, fix_licenses=True, no_prompt=args.no_prompt, project_name=name,
-                    templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                    templates_dir=overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None,
+                    base_templates_dir=base_tmpl_dir.as_posix() if base_tmpl_dir else None,
                     assume_yes=args.assume_yes, show_diffs=args.show_diffs,
                     is_init=is_create_run
                 )
@@ -608,7 +637,8 @@ def main(argv: list[str] | None = None) -> int:
             if not skip_templates:
                 code, res = verify_repo(
                     root, fix_licenses=True, no_prompt=args.no_prompt, project_name=None,
-                    templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                    templates_dir=overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None,
+                    base_templates_dir=base_tmpl_dir.as_posix() if base_tmpl_dir else None,
                     assume_yes=args.assume_yes, show_diffs=args.show_diffs,
                     is_init=is_create_run
                 )
@@ -621,7 +651,8 @@ def main(argv: list[str] | None = None) -> int:
                 if t_dir.exists():
                     build_all_libs(
                         repo=t_dir, workspace_dir=workspace_dir, project_tokens=[],
-                        templates_dir=tmpl_dir.as_posix() if tmpl_dir else None,
+                        templates_dir=overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None,
+                        base_templates_dir=base_tmpl_dir.as_posix() if base_tmpl_dir else None,
                         do_clone=False,
                         do_build=args.build_deps,   # Only build if explicitly asked
                         do_install=args.build_deps, # Only install if explicitly asked
@@ -804,9 +835,10 @@ def main(argv: list[str] | None = None) -> int:
                     if tag_name not in check_tag.stdout.split():
                         subprocess.run(["git", "tag", "-a", tag_name, "-m", f"Release {tag_name}"], cwd=dest, capture_output=True, text=True)
 
-                    if tmpl_dir:
+                    if base_tmpl_dir or overlay_tmpl_dir:
                         new_yaml_version = tag_name[1:] if tag_name.startswith("v") else tag_name
-                        _update_yaml_version(tmpl_dir, raw_token, new_yaml_version)
+                        # Default to updating the base registry if it exists, otherwise the overlay
+                        _update_yaml_version(base_tmpl_dir or overlay_tmpl_dir, raw_token, new_yaml_version)
 
                     if args.push:
                         print(f"  - Pushing branch '{default_branch}' and tag '{tag_name}' to origin...")
