@@ -1,0 +1,249 @@
+{#- scaffold-repo: deps -#}
+# CMakeLists.txt for libraries (regular or header-only)
+cmake_minimum_required(VERSION {{ cmake_min_version | default("3.20") }})
+
+project({{ project_snake }}
+  VERSION {{ version | default("1.0.0") }}
+  LANGUAGES {{ language | default("C") }}
+)
+
+{%- if kind == "header_only" %}
+
+# ── Header-only target ─────────────────────────────────────────────────────────
+add_library({{ project_snake }} INTERFACE)
+add_library({{ project_snake }}::{{ project_snake }} ALIAS {{ project_snake }})
+
+target_include_directories({{ project_snake }} INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+# Optional: expose required features
+target_compile_features({{ project_snake }} INTERFACE
+  c_std_{{ c_standard | default(17) }}
+)
+
+include(GNUInstallDirs)
+install(DIRECTORY include/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Export + install targets
+install(TARGETS {{ project_snake }} EXPORT {{ project_snake }}Targets)
+install(EXPORT {{ project_snake }}Targets
+  FILE {{ project_snake }}Targets.cmake
+  NAMESPACE {{ project_snake }}::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/{{ project_snake }})
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+  {{ header_only_config_in | default("${CMAKE_CURRENT_SOURCE_DIR}/cmake/Config.cmake.in") }}
+  ${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}Config.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/{{ project_snake }}
+)
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}ConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}Config.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}ConfigVersion.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/{{ project_snake }}
+)
+
+{%- else %}
+
+# ── Variant selection for the umbrella alias (NOT for building) ───────────────
+# We build ALL variant targets below; this just selects which one the umbrella
+# alias ({{ project_snake }}::{{ project_snake }}) points to during this configure.
+set(A_BUILD_VARIANT "{{ default_variant | default("debug") }}" CACHE STRING
+    "Umbrella choice for in-tree linking (debug|memory|static|shared)")
+set_property(CACHE A_BUILD_VARIANT PROPERTY STRINGS debug memory static shared)
+
+# ── Developer-only coverage toggle (applies to this entire CMake tree) ────────
+option(A_ENABLE_COVERAGE "Enable code coverage instrumentation for this build" OFF)
+if(A_ENABLE_COVERAGE)
+  if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-O0 -g -fprofile-instr-generate -fcoverage-mapping)
+    add_link_options(-fprofile-instr-generate -fcoverage-mapping)
+  elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    add_compile_options(-O0 -g --coverage)
+    add_link_options(--coverage)
+  endif()
+endif()
+
+# Memory-profile convenience for the *_memory variant
+option(A_BUILD_ENABLE_MEMORY_PROFILE "Define a macro on the 'memory' variant" OFF)
+set(A_BUILD_MEMORY_DEFINE "_AML_DEBUG_" CACHE STRING
+    "Macro to define on the 'memory' variant when memory profiling is enabled")
+
+# Emulate Debug/Release per-variant (so one configure can build both kinds)
+if(MSVC)
+  set(_A_DEBUG_OPTS /Zi /Od)
+  set(_A_RELEASE_OPTS /O2 /DNDEBUG)
+else()
+  set(_A_DEBUG_OPTS -O0 -g)
+  set(_A_RELEASE_OPTS -O3 -DNDEBUG)
+endif()
+
+include(GNUInstallDirs)
+
+# ---- Dependencies (Standard CMake) ----
+{% for fp in find_packages or [] %}
+find_package({{ fp }})
+{% endfor %}
+
+# ---- Dependencies (PkgConfig Shims) ----
+{% if pkg_config_deps %}
+find_package(PkgConfig REQUIRED)
+{% for dep in pkg_config_deps %}
+# Use IMPORTED_TARGET to automatically create PkgConfig::PC_{{ dep.target | upper }}
+pkg_check_modules(PC_{{ dep.target | upper }} REQUIRED IMPORTED_TARGET {{ dep.module }})
+
+# Alias '{{ dep.target }}' to the robust PkgConfig target
+if(NOT TARGET {{ dep.target }})
+  add_library({{ dep.target }} ALIAS PkgConfig::PC_{{ dep.target | upper }})
+endif()
+{% endfor %}
+{% endif %}
+
+
+# ── Library variants (ALL are defined & built/installed) ──────────────────────
+{% for variant in ["debug","memory","static","shared"] %}
+
+{% if variant == "shared" %}
+add_library({{ project_snake }}_{{ variant }} SHARED
+{% else %}
+add_library({{ project_snake }}_{{ variant }} STATIC
+{% endif %}
+{%- for s in sources %}
+  {{ s }}
+{%- endfor %}
+)
+
+target_include_directories({{ project_snake }}_{{ variant }} PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
+
+set_target_properties({{ project_snake }}_{{ variant }} PROPERTIES
+  C_STANDARD {{ c_standard | default(99) }}
+  C_STANDARD_REQUIRED YES
+  POSITION_INDEPENDENT_CODE {{ pic | default(true) | ternary("ON","OFF") }}
+)
+
+if("CXX" IN_LIST CMAKE_PROJECT_LANGUAGES)
+  set_target_properties({{ project_snake }}_{{ variant }} PROPERTIES
+    CXX_STANDARD {{ cxx_standard | default(17) }}
+    CXX_STANDARD_REQUIRED YES
+  )
+endif()
+
+# Link deps once
+target_link_libraries({{ project_snake }}_{{ variant }} PUBLIC
+{%- for l in link_libraries or [] %}
+  {{ l }}
+{%- endfor %}
+)
+
+# Per-variant optimization flavor
+{% if variant in ["debug","memory"] %}
+target_compile_options({{ project_snake }}_{{ variant }} PRIVATE ${_A_DEBUG_OPTS})
+{% else %}
+target_compile_options({{ project_snake }}_{{ variant }} PRIVATE ${_A_RELEASE_OPTS})
+{% endif %}
+
+# Memory profiling macro on the memory variant (opt-in)
+{% if variant == "memory" %}
+if(A_BUILD_ENABLE_MEMORY_PROFILE)
+  target_compile_definitions({{ project_snake }}_memory PUBLIC ${A_BUILD_MEMORY_DEFINE})
+endif()
+{% endif %}
+
+# Install this variant
+install(TARGETS {{ project_snake }}_{{ variant }} EXPORT {{ project_snake }}Targets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+{% endfor %}
+
+# In-tree umbrella alias picking one variant (for unified builds)
+string(REPLACE "-" "_" _variant_us "${A_BUILD_VARIANT}")
+set(_sel_tgt "{{ project_snake }}_${_variant_us}")
+if(TARGET "${_sel_tgt}")
+  add_library({{ project_snake }}::{{ project_snake }} ALIAS ${_sel_tgt})
+endif()
+
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+
+# Export all variant targets together
+install(EXPORT {{ project_snake }}Targets
+  FILE {{ project_snake }}Targets.cmake
+  NAMESPACE {{ project_snake }}::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/{{ project_snake }})
+
+# ---- Package config with umbrella target -------------------------------------
+set(_CFG_IN "${CMAKE_CURRENT_BINARY_DIR}/config.cmake.in")
+file(WRITE "${_CFG_IN}" [=[
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+
+if(NOT DEFINED A_BUILD_VARIANT OR A_BUILD_VARIANT STREQUAL "")
+  set(A_BUILD_VARIANT "debug")
+endif()
+string(REPLACE "-" "_" _picked_us "${A_BUILD_VARIANT}")
+
+set(_save_variant "${A_BUILD_VARIANT}")
+set(_deps "@A_BUILD_DEPS@")
+foreach(_dep IN LISTS _deps)
+  if(_dep)
+    find_dependency("${_dep}" REQUIRED)
+  endif()
+endforeach()
+set(A_BUILD_VARIANT "${_save_variant}")
+
+include("${CMAKE_CURRENT_LIST_DIR}/{{ project_snake }}Targets.cmake")
+
+set(_ns "@A_BUILD_EXPORT_NAMESPACE@")
+set(_pkg "@A_BUILD_TARGET_BASENAME@")
+if(NOT TARGET ${_ns}::${_pkg})
+  add_library(${_ns}::${_pkg} INTERFACE IMPORTED)
+endif()
+
+set(_pick ${_ns}::${_pkg}_${_picked_us})
+if(TARGET "${_pick}")
+  target_link_libraries(${_ns}::${_pkg} INTERFACE "${_pick}")
+endif()
+]=])
+
+set(A_BUILD_TARGET_BASENAME "{{ project_snake }}")
+set(A_BUILD_EXPORT_NAMESPACE "{{ project_snake }}")
+set(A_BUILD_DEPS "{{ deps_for_config | default([]) | join(';') }}")
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+  "${_CFG_IN}"
+  "${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}Config.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/{{ project_snake }}
+)
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}ConfigVersion.cmake"
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion
+)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}Config.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/{{ project_snake }}ConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/{{ project_snake }}
+)
+{%- endif %}
+
+# Extra project-specific targets
+{{ extra_targets | default("") }}
+
+{% if test_targets %}
+enable_testing()
+add_subdirectory(tests)
+{% endif %}
