@@ -81,10 +81,10 @@ RUN set -eux; \
 {% endfor %}
 
 # --- Build & install this project --------------------------------------------
-COPY --chown=dev:dev . /workspace/{{ project_name }}
-RUN mkdir -p /workspace/build/{{ project_name }} && \
-    cd /workspace/build/{{ project_name }} && \
-    cmake /workspace/{{ project_name }} && \
+COPY --chown=dev:dev . /workspace/{{ project_slug }}
+RUN mkdir -p /workspace/build/{{ project_slug }} && \
+    cd /workspace/build/{{ project_slug }} && \
+    cmake /workspace/{{ project_slug }} && \
     make -j"$(nproc)" && sudo make install
 
 CMD ["/bin/bash"]
