@@ -200,7 +200,7 @@ templates/
 └── resources/                 # Global assets like aliases.yaml or canonical license texts
 ```
 
-If you are a Platform Engineer looking to write custom templates, configure organizational profiles, or define internal dependencies, please read the **[Template Authoring Guide](https://www.google.com/search?q=README-templates.md)**.
+If you are a Platform Engineer looking to write custom templates, configure organizational profiles, or define internal dependencies, please read the **[Template Authoring Guide](README-templates.md)**.
 
 -----
 
