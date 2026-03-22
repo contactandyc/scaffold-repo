@@ -1,221 +1,247 @@
 # `scaffold-repo`
 
-`scaffold-repo` is a registry-driven scaffolding engine and meta-package manager designed for C/C++ and polyglot repositories.
+Managing one repository is easy. Managing twenty interconnected micro-repos—keeping their build scripts, OSS licenses, CI pipelines, and Git workflows synchronized across multiple languages—is a nightmare.
 
-Rather than generating a repository once and leaving it unmanaged, `scaffold-repo` allows you to maintain multiple repositories from a centralized YAML registry. By defining library metadata, authorship, and dependency mappings in one place, the engine can perform a topological sort of your dependency graph, compute CMake linking requirements, apply open-source compliance headers, and synchronize these configurations across your designated repositories. This centralized approach allows you to apply broad structural changes—such as updating a minimum CMake version or standardizing a CI pipeline—across an entire project ecosystem via a single registry update and CLI execution.
+`scaffold-repo` is a **Declarative Fleet Manager** and build orchestrator for polyglot ecosystems. Instead of manually updating 20 different `CMakeLists.txt` or `pyproject.toml` files, you define your company's standards in a centralized Template Registry. With a single CLI command, `scaffold-repo` resolves dependency graphs, injects stack-specific build scripts, enforces license compliance, and orchestrates Git branching across your entire fleet.
 
----
+-----
 
-## Core Capabilities
+## 📦 Installation
 
-* **Graph-Aware Generation:** Parses `depends_on:` declarations to topologically sort dependencies. It automatically generates `CMakeLists.txt`, `build.sh`, and `Dockerfile` assets with the corresponding `find_package` and `target_link_libraries` configurations.
-* **CMake Build Variants:** Generates four standard build configurations for C/C++ libraries (`debug`, `memory`, `static`, `shared`) alongside an umbrella target for downstream consumption.
-* **OSS Compliance Management:** Injects and updates SPDX license headers across supported file types (including C, C++, Python, JS, HTML), aggregates `NOTICE` files based on repository lineage, and synchronizes canonical `LICENSE` texts.
-* **Polyglot & Multi-App Routing:** Scaffolds base C/C++ libraries while routing distinct templates to sub-applications (e.g., combining C libraries with C++ binaries or Jekyll sites) using the `app-resources/` directory.
-* **External Dependency Handling:** Clones, configures, and installs external Git dependencies (such as `libuv` or `fmt`) in the order required by your dependency graph.
-* **State Management:** Compares normalized ASTs to minimize unnecessary diffs, respects `.gitignore` rules, and provides configuration options to freeze specific files from future template overwrites.
+Since `scaffold-repo` is a global fleet manager, it is highly recommended to install it using `pipx` so it is isolated but globally available on your command line.
 
----
+```bash
+# 1. Clone the orchestrator
+git clone https://github.com/your-org/scaffold-repo.git
+cd scaffold-repo
 
-## Registry Architecture
+# 2. Install globally
+pipx install .
 
-The central registry is located within the `templates/` directory. It strictly separates YAML data from Jinja2/verbatim templates:
-
-```text
-templates/
-├── .scaffold-defaults.yaml     # Internal engine router (specifies active packages)
-├── libraries/                  # The registry of configured libraries
-│   └── my-namespace/
-│       └── my-library.yaml
-├── profiles/                   # Global variables (authors, organizations, base licenses)
-├── library-templates/          # Architectural archetypes (e.g., cmake-c-git)
-├── licenses/                   # SPDX and NOTICE configurations
-├── flavors/                    # Root-level Jinja templates (CMakeLists.txt, build.sh)
-└── app-resources/              # Sub-application templates (isolated from the root)
-
+# (Optional) If you are actively developing the templates or engine:
+pip install -e .
 ```
 
-### Declarative Configuration
+Verify the installation by running: `scaffold-repo --help`
 
-A library and its sub-components are defined using a structured YAML format.
+-----
 
-**`templates/libraries/my-namespace/a-bitset-library.yaml`**
+## ⏱️ The 10-Second Overview
+
+**1. Initialize your Workspace:**
+
+```bash
+scaffold-repo --init
+```
+
+*The dynamic wizard connects to your company's Template Registry, asks you for your default development environments (like your preferred Python version or CMake generator), and drops a `.scaffoldrc.yaml` into your workspace.*
+
+**2. Create a Project:**
+
+```bash
+scaffold-repo --create my-python-app
+```
+
+*The engine asks what stack you want (e.g., Python, C++), applies your organizational profile, generates the initial code, and locks the configuration into a local `scaffold.yaml`.*
+
+**3. Build and Develop predictably:**
+
+```bash
+cd my-python-app
+./build.sh install
+```
+
+*The generated `build.sh` provides a predictable, standardized contract for developers. However, the repository is **100% standalone**. You can bypass the script entirely and run standard `cmake`, `make`, `pip`, or `python` commands directly. `scaffold-repo` is never required to build or run the generated code.*
+
+-----
+
+## 🚀 Core Features
+
+* **Zero Vendor Lock-In:** Repositories generated by `scaffold-repo` are completely standalone units. They do not depend on the orchestrator to build, test, or run. The generated `./build.sh` is simply a convenience wrapper to provide a unified interface across the fleet.
+* **Fleet-Wide Aliases & Multi-Repo Execution:** Define groups of repositories in `resources/aliases.yaml`. Run `scaffold-repo my-team-alias --update` to seamlessly clone, scaffold, and upgrade dozens of repositories concurrently.
+* **The Ultimate Dry-Run (`--diff`):** When managing a massive fleet, blindly applying template updates is dangerous. Run `scaffold-repo all --diff` to get a unified, bird's-eye view of exactly how your templates have drifted, what licenses need updating, or what local files are dirty across your *entire ecosystem* before modifying a single file on disk.
+* **✨ Context-Aware Execution:** Once you `cd` into a generated project, `scaffold-repo` automatically detects your `scaffold.yaml`. You never have to type the project name again\!
+* **Decentralized, Git-Native Resolution:** Dependencies aren't locked in a proprietary package manager. The engine reads YAML `depends_on` arrays that point to actual Git URLs, topologically sorts the graph, and automatically clones and builds external dependencies in the exact required order.
+* **Automated OSS Compliance:** Automatically translates and injects SPDX license headers into your code (`//` for C++, `#` for Python). Supports **multi-license repositories** natively—apply Apache-2.0 to your core project, but seamlessly enforce BSD-3 headers for files inside `src/third_party/`.
+
+-----
+
+## 🧬 The Local Manifest & Separation of Concerns
+
+A core philosophy of `scaffold-repo` is the strict separation of **Implementation** (the code) and **Standardization** (the templates).
+
+While the global Template Registry dictates the *rules* of your ecosystem, the local `scaffold.yaml` file (sitting at the root of every generated repository) provides the *context*. This ensures that individual repositories maintain their own specific information and are never blindly tied to the orchestrator.
+
+Furthermore, the `depends_on` array utilizes a **Decentralized Graph**. Notice that dependencies explicitly declare remote Git URLs or system packages, rather than relying on a proprietary internal registry:
+
+**Example `scaffold.yaml`:**
 
 ```yaml
-project_title: A Bitset Library
-version: 0.0.1
+project_title: A Map Reduce Library
+version: 0.0.3
 
-# 1. Inherit global authors, tools, and the default OSS license
-profile: my-namespace/my-profile
-
-# 2. Assign the C/CMake architecture template
+# 1. Inherit company defaults and the C++ CMake architecture
+profile: my-org/backend-team
 template: cmake-c-git
 
-# 3. Define internal dependencies for CMake linking
+# 2. Override specific file licenses natively
+license_profile: my-org/apache-2
+license_overrides:
+  "src/impl/**": my-org/lz4-bsd-license
+
+# 3. Decentralized, Git-native dependency linking
 depends_on:
-  - my-namespace/a-memory-library
+  - https://github.com/my-org/the-io-library.git
+  - system/OpenSSL
 
-# 4. Define tests (auto-detected from src/ if omitted)
-tests:
-  targets:
-    - test_bitset
-    - test_bitset_expandable
-
-# 5. Define sub-applications or examples
+# 4. Route sub-applications and examples dynamically
 apps:
   context:
     dest: examples
-  demo:
+    depends_on:
+      - https://github.com/my-org/a-map-reduce-library.git
+  01_word_count:
     binaries:
-      - parse_sentences
-
+      word_count:
+        - src/main.c
 ```
 
----
+Because the repository retains its own source of truth, it remains a standard, portable Git repository. The orchestrator merely reads this manifest to compute linking requirements and execute the build graph.
 
-## Generated Output
+-----
 
-When executed against a C/C++ project, `scaffold-repo` produces a standardized repository structure.
+## 🛠 The GitOps Workflow
 
-### CMake and Library Variants
+`scaffold-repo` actively manages your development lifecycle, enforcing a clean **`main` -\> `dev-*` -\> `feat/*`** branching topology.
 
-For compiled libraries, the engine outputs `debug`, `memory`, `static`, and `shared` variants, which can be built and installed concurrently. It also establishes an umbrella target, **`<name>::<name>`**, for consumer linking:
+*Note: The examples below show running commands inside a single repository. You can run these exact same commands against dozens of repositories at once from your workspace root by providing an alias:* `scaffold-repo my-alias --update`
 
-```cmake
-set(A_BUILD_VARIANT "debug") # options: memory | static | shared
-find_package(a_bitset_library CONFIG REQUIRED)
-target_link_libraries(myexe PRIVATE a_bitset_library::a_bitset_library)
+### Workflow A: Developing a New Feature
 
-```
-
-### Standardized Build Script
-
-Each repository is populated with a generator-aware `build.sh` script (defaulting to Ninja, falling back to Make) that supports the following standard commands:
+**1. Start a Feature**
 
 ```bash
-./build.sh build      # Configures and builds the project
-./build.sh install    # Builds and installs the project (requests sudo if required)
-./build.sh coverage   # Builds tests, executes them, and generates an HTML coverage report
-./build.sh clean      # Removes build directories
-
+scaffold-repo --start-feature "add-auth"
 ```
 
----
+> Automatically checks out the current integration branch (e.g., `dev-v0.1.1`) and creates the branch `feat/add-auth`.
 
-## CLI Workflow and Usage
-
-`scaffold-repo` auto-detects the registry if run from a directory containing a `templates/` folder. Alternatively, you can specify the path using `--templates-dir` or `-C`.
-
-### The Branching Pipeline
-
-The engine utilizes a 4-phase pipeline (Scaffold, Dependencies, Build, Git Sync) and enforces a **`main` -> `dev-*` -> `feat/***` branching topology. Generated code is isolated into a `../repos` directory to keep the primary workspace clear.
-
-**Step 1: Start a Feature**
+**2. Compile & Iterate**
 
 ```bash
-scaffold-repo my-namespace --start-feature "dynamic-resize" -y
-
+scaffold-repo --build-deps --build
 ```
 
-> Clones missing repositories and synchronizes existing ones. It creates or checks out the integration branch (e.g., `dev-v0.0.2`), and branches `feat/dynamic-resize` for template scaffolding.
-
-**Step 2: Compile Dependencies & First-Party Code**
+**3. Commit and Push**
 
 ```bash
-scaffold-repo my-namespace --build-deps --build
-
+scaffold-repo --commit "feat: added auth module" --push
 ```
 
-> Compiles and installs external dependencies, then performs a topological execution of `./build.sh install` on the local C++ libraries.
+> Commits changes to your feature branch and pushes to origin. (The engine blocks direct commits to `main` or `dev-*`).
 
-**Step 3: Commit and Push**
+### Workflow B: Updating Fleet Scaffolding
+
+When the platform team updates a license or modifies a global template, you can sync the changes across your repositories effortlessly.
+
+**1. Preview the Fleet Drift**
 
 ```bash
-scaffold-repo my-namespace --commit "WIP: integrating allocator" --push
-
+scaffold-repo --diff
 ```
 
-> Commits changes to the feature branch and pushes to origin. The engine prevents direct commits to `main` or the `dev-*` integration branches during this step.
+> Safely inspect exactly what files the engine wants to update across your active projects.
 
-**Step 4: Publish Release**
-*(Executed after merging PRs into the `dev-*` integration branch)*
+**2. Apply Template Updates**
 
 ```bash
-scaffold-repo my-namespace --publish-release --push
-
+scaffold-repo --update
 ```
 
-> Checks out `main`, merges the specified `dev` branch, auto-tags the release based on the YAML version, bumps the version in the central registry, and pushes the updates.
+> Pulls down the latest templates and merges them with your code. **Magic:** If you are currently sitting on a protected `dev-*` branch, the engine will automatically spawn a `chore/update-scaffolding` branch for you\!
 
-### Complete CLI Reference
+**3. Publish to Integration**
+
+```bash
+scaffold-repo --publish-feature --push
+```
+
+> **Magic:** Because you are on the `chore/update-scaffolding` branch, the engine automatically detects the dirty tree, commits the changes for you, merges the code into the `dev-*` integration branch, and cleans up the working branches\!
+
+### Releasing
+
+Once your features and updates are merged into the integration branch, cut the official release.
+
+**1. Release & Tag**
+
+```bash
+scaffold-repo --publish-release --push
+```
+
+> Checks out `main`, merges the `dev` branch, auto-tags the release based on your `scaffold.yaml` version, updates the registry, and pushes the tags to origin.
+
+-----
+
+## 🏗 Under the Hood: The Template Registry
+
+All of `scaffold-repo`'s power comes from the **Template Registry**. The engine itself contains zero hardcoded opinions. By default, the engine connects to a central Base Registry, but developers can initialize a **Local Overlay** to inject custom templates or linters without forking the base repository.
+
+```text
+templates/
+├── .scaffold-defaults.yaml    # Global router: defines global variables, prompts, and packages
+├── base/                      # Universal repository defaults (e.g., .gitignore, AUTHORS)
+├── stacks/                    # The technical implementations (e.g., c/cmake, python/standard)
+├── profiles/                  # Organizational standards (author info, default licenses, tools)
+├── mixins/                    # Modular, optional Jinja templates (changie, jekyll-site)
+├── library-templates/         # Archetype YAML configs for dependencies (e.g., cmake-c-git)
+├── libraries/                 # The global dependency index (how to build/link external tools)
+├── licenses/                  # SPDX logic and NOTICE file generators
+├── app-resources/             # Special templates looped per sub-application inside a repo
+└── resources/                 # Global assets like aliases.yaml or canonical license texts
+```
+
+If you are a Platform Engineer looking to write custom templates, configure organizational profiles, or define internal dependencies, please read the **[Template Authoring Guide](https://www.google.com/search?q=README-templates.md)**.
+
+-----
+
+## 💻 Complete CLI Reference
 
 ```text
 Usage: scaffold-repo [PROJECTS...] [OPTIONS]
 
 Arguments:
-  PROJECTS                  One or more projects/namespaces to scaffold or build.
-                            (e.g., 'my-namespace/a-bitset-library', 'common', 'all')
+  PROJECTS                  One or more projects/namespaces/aliases to scaffold or build.
+                            (e.g., 'my-python-app', 'my-alias', 'all')
+                            *Note: Omit if running inside a project directory!*
 
 Workspace Options:
+  --init                    Initialize a .scaffoldrc workspace configuration (Interactive)
   -C, --cwd PATH            Run as if started in <PATH> (default: current dir)
   --templates-dir PATH      Override templates directory (auto-detects ./templates)
   --start-feature NAME      Start a feature branch off the integration dev branch
-                            (Auto-computes the target dev branch from the YAML version)
 
 Scaffolding Options:
-  -y, --assume-yes          Apply template updates and fix licenses without prompting
+  --create SLUG             Create a new project in the workspace (Interactive)
+  --update                  Explicitly apply template updates to the targeted repositories
+  --diff                    Print unpaginated Git diffs for targeted repos
+  -y, --assume-yes          Apply template updates without prompting
   --show-diffs              Print inline diffs before applying file updates
   --no-prompt               Do not prompt during SPDX license header fixups
 
 Dependency Lifecycle:
   --clone-deps              Fetch external dependencies without compiling
-  --build-deps              Fetch and compile external dependencies
-  --install-deps            Fetch, compile, and install external dependencies
+  --build-deps              Fetch, compile, and install external dependencies
+  --clean-deps              Wipe build caches for dependencies
 
 Target Lifecycle (Your Code):
-  --build                   Run './build.sh build' on the scaffolded projects
-  --install                 Run './build.sh install' on the scaffolded projects
+  --clean                   Run './build.sh clean' on the targeted projects
+  --build                   Run './build.sh build' on the targeted projects
+  --install                 Run './build.sh install' on the targeted projects
 
 Git Orchestration:
-  --diff                    Print the unpaginated Git diff for all targeted repos
-  --commit MSG              Commit changes in target projects (blocked on 'main' and 'dev-*')
-  --publish-feature         Merge current feature branch into dev branch and delete feature branch
-  --drop-feature            Discard current feature branch (and uncommitted changes), return to dev
-  --publish-release         Merge an integration branch into main, tag it, and bump YAML
-  --push                    Push commits to origin (Pushes main+tags if used with --publish-release)
-  --tag                     Tag targets using their YAML 'version' (e.g., 'v0.0.1')
-
+  --commit MSG              Commit changes (blocked on 'main' and 'dev-*')
+  --publish-feature         Merge current feature branch into dev branch and delete feature
+  --drop-feature            Discard current feature branch and uncommitted changes
+  --publish-release         Merge dev branch into main, tag it, and update registry version
+  --push                    Push commits to origin
 ```
-
----
-
-## Advanced Template Configuration
-
-### Jinja Front-Matter Routing
-
-Template routing and file overwrite rules can be configured using a Jinja comment block at the top of `.j2` files:
-
-```jinja
-{#- scaffold-repo: { dest: "src/main.c", updatable: false, context: "cmake" } -#}
-
-```
-
-* `dest`: Overrides the default output directory.
-* `updatable: false`: Instructs the engine to generate the file on the initial run but ignore it on subsequent runs, preserving manual edits.
-* `context`: Shifts the Jinja dictionary evaluation root to a specific sub-key (e.g., scoping the template to the `tests:` block).
-
-### Template Language Isolation
-
-If the generated files utilize their own templating syntax (such as Go templates or Liquid), wrap the syntax in `{% raw %}` blocks to prevent the Jinja scanner from evaluating it:
-
-```jinja
-{% raw %}
-versionFormat: '## {{.Version}} - {{.Time.Format "2006-01-02"}}'
-{% endraw %}
-
-```
-
-### Path Stripping and Sub-Application Shielding
-
-* **Automatic Stripping:** The engine automatically removes structural folder prefixes (like `flavors/cmake-c/`) when writing files to the target repository.
-* **App Shielding:** Templates located in `templates/app-resources/<flavor>/` are excluded from the root repository generation cycle. They are routed exclusively to the sub-applications defined in the `apps:` block of the library's YAML configuration.

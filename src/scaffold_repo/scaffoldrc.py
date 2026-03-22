@@ -102,6 +102,7 @@ def _sync_registry(url: str, ref: str) -> Path:
     return cache_dir
 
 def init_scaffoldrc() -> int:
+    import yaml
     print("\n\033[1m=== Initializing scaffold-repo workspace ===\033[0m\n")
 
     target = Path.cwd().resolve()
@@ -132,7 +133,6 @@ def init_scaffoldrc() -> int:
             print("\n❌ Failed to fetch remote registry. Aborting.")
             return 1
 
-    # --- NEW: Ask for an Overlay Directory ---
     print("")
     ans_overlay = input("Do you want to configure a local templates overlay? (For custom profiles/licenses) [y/N]: ").strip().lower()
     if ans_overlay in ("y", "yes"):
@@ -141,14 +141,26 @@ def init_scaffoldrc() -> int:
 
     print(f"✅ Auto-detected base templates at: \033[96m{tmpl_dir}\033[0m")
 
+    # --- Use ConfigReader to unify the overlay and base! ---
+    from .config_reader import ConfigReader
+    overlay_path = existing_cfg.get("template_overlay_dir")
+    overlay_tmpl_dir = (workspace_dir / overlay_path).resolve() if overlay_path else None
+    reader = ConfigReader(
+        workspace_dir,
+        project_name=None,
+        templates_dir=(overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None),
+        base_templates_dir=tmpl_dir.as_posix()
+    )
+
     prompts_queue = []
-    root_defaults = tmpl_dir / ".scaffold-defaults.yaml"
-    if root_defaults.exists():
+    root_defaults_text = reader.tmpl_src.read_resource_text(".scaffold-defaults.yaml")
+    if root_defaults_text:
         try:
-            loaded = (yaml.safe_load(root_defaults.read_text(encoding="utf-8")) or {}).get("init_prompts", [])
+            loaded = (yaml.safe_load(root_defaults_text) or {}).get("init_prompts", [])
             for lp in loaded: lp["__path"] = []
             prompts_queue.extend(loaded)
-        except Exception: pass
+        except Exception as e:
+            print(f"Warning: Failed to load root defaults: {e}")
 
     answers = {}
     collected_answers = []
@@ -162,12 +174,18 @@ def init_scaffoldrc() -> int:
 
         while prompts_queue:
             p = prompts_queue.pop(0)
+
+            # THE BUG FIX: Force it back to a list if it somehow mutated
             p_list = p.get("__path", [])
+            if not isinstance(p_list, list): p_list = list(p_list)
+
             raw_var = p.get("var")
 
-            if raw_var in seen_prompt_vars:
+            # Unique key safely uses tuple format so it's hashable
+            prompt_key = (tuple(p_list), raw_var)
+            if prompt_key in seen_prompt_vars:
                 continue
-            seen_prompt_vars.add(raw_var)
+            seen_prompt_vars.add(prompt_key)
 
             ctx = {k.lower(): v for k, v in answers.items()}
             if len(p_list) > 0: ctx["stack"] = p_list[0]
@@ -185,11 +203,18 @@ def init_scaffoldrc() -> int:
             if "choices_from_dir" in p:
                 dir_tmpl = p["choices_from_dir"]
                 dir_str = jenv.from_string(dir_tmpl).render(**ctx).strip()
-                target_dir = tmpl_dir / dir_str
-                if target_dir.is_dir():
-                    exclude = p.get("exclude", [])
-                    found = sorted([d.name for d in target_dir.iterdir() if d.is_dir() and not d.name.startswith(".")])
-                    options.extend([f for f in found if f not in exclude])
+
+                # --- Search Virtual File System! ---
+                options_from_dir = set()
+                for rel, _, _, _ in reader.tmpl_src.iter_files():
+                    if rel.startswith(f"{dir_str}/"):
+                        parts = rel[len(dir_str)+1:].split("/")
+                        if parts and parts[0] and not parts[0].startswith("."):
+                            options_from_dir.add(parts[0])
+
+                exclude = p.get("exclude", [])
+                found = sorted([f for f in options_from_dir if f not in exclude])
+                options.extend(found)
 
             if def_val == "./install": def_val = str(workspace_dir / "install")
             options = [o if o != "./install" else str(workspace_dir / "install") for o in options]
@@ -221,15 +246,19 @@ def init_scaffoldrc() -> int:
                 ans_list = ans if isinstance(ans, list) else [ans]
                 new_prompts = []
                 for a in ans_list:
-                    sub_defaults = tmpl_dir / dir_str / a / ".scaffold-defaults.yaml"
-                    if sub_defaults.exists():
+                    # --- Search Virtual File System! ---
+                    sub_defaults_text = reader.tmpl_src.read_resource_text(f"{dir_str}/{a}/.scaffold-defaults.yaml")
+                    if sub_defaults_text:
                         try:
-                            loaded_prompts = (yaml.safe_load(sub_defaults.read_text(encoding="utf-8")) or {}).get("init_prompts", [])
-                            next_path = p_list + [a]
+                            loaded_prompts = (yaml.safe_load(sub_defaults_text) or {}).get("init_prompts", [])
+                            # Safely create the next array level
+                            next_path = list(p_list) + [a]
                             for lp in loaded_prompts:
                                 lp["__path"] = next_path
                             new_prompts.extend(loaded_prompts)
-                        except Exception: pass
+                        except Exception as e:
+                            print(f"Warning: Failed to load prompts for {a}: {e}")
+
                 prompts_queue = new_prompts + prompts_queue
 
     except KeyboardInterrupt:
