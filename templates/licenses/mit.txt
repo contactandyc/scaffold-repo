@@ -1,5 +1,0 @@
-spdx: |
-  SPDX-FileCopyrightText: {{ year }} {{ author }}
-  SPDX-License-Identifier: MIT
-license: LICENSE
-license_canonical: resources/licenses/MIT.txt

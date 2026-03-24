@@ -8,6 +8,8 @@ import os
 import posixpath
 import re
 import sys
+import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -70,6 +72,39 @@ def _diff(old: bytes, new: bytes, path: str) -> str:
     old_lines = old.decode("utf-8", errors="replace").splitlines(keepends=True)
     new_lines = new.decode("utf-8", errors="replace").splitlines(keepends=True)
     return "".join(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}"))
+
+def _fetch_remote_yaml(url: str) -> dict:
+    """Fetches and caches YAML directly from HTTP/HTTPS or Git URLs."""
+    if not url.startswith(("http://", "https://")):
+        return {}
+
+    # Smart transformation: Convert github repo URLs directly to raw scaffold.yaml
+    if url.endswith(".git") and "github.com" in url:
+        parts = url.replace(".git", "").split("github.com/")[-1].split("/")
+        if len(parts) >= 2:
+            url = f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/main/scaffold.yaml"
+
+    cache_key = hashlib.md5(url.encode('utf-8')).hexdigest()
+    cache_file = Path.home() / ".cache" / "scaffold-repo" / "urls" / f"{cache_key}.yaml"
+
+    if cache_file.exists():
+        try:
+            return yaml.safe_load(cache_file.read_text(encoding="utf-8")) or {}
+        except Exception:
+            pass
+
+    print(f"  [Network] Fetching remote config: {url}")
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as response:
+            raw_text = response.read().decode('utf-8')
+
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(raw_text, encoding="utf-8")
+        return yaml.safe_load(raw_text) or {}
+    except Exception as e:
+        print(f"Warning: Failed to fetch remote config {url}: {e}", file=sys.stderr)
+        return {}
 
 _OSS_HEADER_EXTS = {
     ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts",
@@ -221,7 +256,12 @@ class TemplateSource:
             if root_data: data = _deep_merge(root_data, data)
 
             def _process_ref(ref: Any, default_folder: str = "", add_include: bool = True) -> Any:
+                if isinstance(ref, dict): return ref # Federated inline dict
                 if not isinstance(ref, str): return ref
+                if ref.startswith(("http://", "https://")): # Federated URL
+                    if add_include and ref not in includes: includes.append(ref)
+                    return ref
+
                 is_ref = ("/" in ref) or ref.endswith((".yaml", ".yml")) or bool(default_folder)
                 if is_ref:
                     inc_path = ref if ref.endswith((".yaml", ".yml")) else f"{ref}.yaml"
@@ -253,7 +293,6 @@ class TemplateSource:
                             if "license_profile" in v: v["license_profile"] = _process_ref(v["license_profile"], "licenses")
                             if "depends_on" in v: v["depends_on"] = [_process_ref(d, "libraries", add_include=False) for d in _coerce_list(v["depends_on"])]
 
-                            # Original robust logic restored:
                             if "license_extras" in v and isinstance(v["license_extras"], dict):
                                 v["license_extras"] = {ek: _process_ref(ev, "licenses") for ek, ev in v["license_extras"].items()}
                             if "license_overrides" in v and isinstance(v["license_overrides"], dict):
@@ -272,9 +311,15 @@ class TemplateSource:
             for inc in includes:
                 if not inc: continue
                 inc_str = str(inc)
+                if inc_str.startswith(("http://", "https://")):
+                    inc_data = _fetch_remote_yaml(inc_str)
+                    base = _deep_merge(base, inc_data)
+                    continue
+
                 if inc_str.startswith("/"): new_rel = posixpath.normpath(inc_str.lstrip("/"))
                 elif inc_str.startswith("./") or inc_str.startswith("../"): new_rel = posixpath.normpath(posixpath.join(posixpath.dirname(rel_path), inc_str))
                 else: new_rel = posixpath.normpath(inc_str)
+
                 inc_data = self._load_logical_path(new_rel, seen_next)
                 base = _deep_merge(base, inc_data)
 
@@ -445,38 +490,112 @@ class ConfigReader:
             try:
                 local_data = yaml.safe_load(local_manifest.read_text(encoding="utf-8")) or {}
 
+                # --- The Recursive Reference Resolver with Path Extraction & INLINE REGISTRIES ---
+                def _resolve_ref(ref_val: Any, category: str, expected_key: str, seen_urls: set = None) -> dict:
+                    if seen_urls is None:
+                        seen_urls = set()
+
+                    result = {}
+
+                    # 1. Inline Dictionary
+                    if isinstance(ref_val, dict):
+                        result = dict(ref_val)
+                        if expected_key in result and isinstance(result[expected_key], str):
+                            base_resolved = _resolve_ref(result.pop(expected_key), category, expected_key, seen_urls)
+                            result = _deep_merge(base_resolved, result)
+
+                    # 2. Strings (Remote, Local, or Inline Registry)
+                    elif isinstance(ref_val, str):
+                        actual_url = ref_val.split("+", 1)[-1].strip() if "+" in ref_val else ref_val.strip()
+
+                        # --- NEW: Check the Inline Registry FIRST ---
+                        # This allows the user to define 'licenses:', 'apps:', etc., directly in scaffold.yaml
+                        inline_registry = local_data.get(category) or local_data.get(category.replace("-", "_"))
+                        inline_match = None
+
+                        if isinstance(inline_registry, list):
+                            for item in inline_registry:
+                                if isinstance(item, dict) and item.get("name") == ref_val:
+                                    inline_match = {k: v for k, v in item.items() if k != "name"}
+                                    break
+                        elif isinstance(inline_registry, dict):
+                            if ref_val in inline_registry:
+                                inline_match = dict(inline_registry[ref_val])
+
+                        if inline_match is not None:
+                            # Treat the inline definition just like a standalone file!
+                            result = _resolve_ref(inline_match, category, expected_key, seen_urls)
+
+                        # --- Remote URLs ---
+                        elif actual_url.startswith(("http://", "https://", "git@")):
+                            extract_path = ref_val.split("+", 1)[0].strip() if "+" in ref_val else expected_key
+
+                            if actual_url in seen_urls: return {}
+                            seen_urls.add(actual_url)
+
+                            raw_data = _fetch_remote_yaml(actual_url)
+
+                            if extract_path == "root": extracted = raw_data
+                            else:
+                                keys = extract_path.split(".")
+                                curr = raw_data
+                                for k in keys:
+                                    if isinstance(curr, dict) and k in curr: curr = curr[k]
+                                    else:
+                                        curr = {}
+                                        break
+                                extracted = curr
+
+                            if isinstance(extracted, str):
+                                result = _resolve_ref(extracted, category, expected_key, seen_urls)
+                            elif isinstance(extracted, dict):
+                                clean_data = dict(extracted)
+                                for k in ["apps", "deps", "depends_on", "project_name", "project_title", "project_slug", "project_snake", "version", "libraries"]:
+                                    clean_data.pop(k, None)
+                                result = clean_data
+
+                        # --- Local Filesystem Fallback ---
+                        else:
+                            ref_path = ref_val if ref_val.endswith((".yaml", ".yml")) else f"{category}/{ref_val}.yaml"
+                            result = self.tmpl_src._load_logical_path(ref_path)
+
+                    # 3. Elevate 'root' to top level
+                    if isinstance(result, dict) and "root" in result and isinstance(result["root"], dict):
+                        root_data = result.pop("root")
+                        result = _deep_merge(root_data, result)
+
+                    return result
+
                 # 1. Resolve template inheritance
-                tmpl_ref = local_data.get("template")
-                if tmpl_ref:
-                    tmpl_path = tmpl_ref if tmpl_ref.endswith(".yaml") else f"library-templates/{tmpl_ref}.yaml"
-                    self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(tmpl_path))
+                if "template" in local_data:
+                    self.cfg = _deep_merge(self.cfg, _resolve_ref(local_data["template"], "library-templates", "template"))
 
                 # 2. Resolve profile inheritance
-                prof_ref = local_data.get("profile")
-                if prof_ref:
-                    prof_path = prof_ref if prof_ref.endswith(".yaml") else f"profiles/{prof_ref}.yaml"
-                    self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(prof_path))
+                if "profile" in local_data:
+                    self.cfg = _deep_merge(self.cfg, _resolve_ref(local_data["profile"], "profiles", "profile"))
 
                 # 3. Resolve base license profile
-                lic_ref = local_data.get("license_profile")
-                if lic_ref:
-                    lic_path = lic_ref if lic_ref.endswith(".yaml") else f"licenses/{lic_ref}.yaml"
-                    self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(lic_path))
+                if "license_profile" in local_data:
+                    self.cfg = _deep_merge(self.cfg, _resolve_ref(local_data["license_profile"], "licenses", "license_profile"))
 
-                # --- THE FIX: EXPLICTLY LOAD LICENSE EXTRAS FROM LOCAL REPOS ---
+                # 4. Resolve explicit license extras/overrides safely!
+                # Keep the keys as strings for repo_sync to find, but load the data into the licenses registry!
                 for l_key in ("license_extras", "license_overrides"):
                     l_dict = local_data.get(l_key)
                     if isinstance(l_dict, dict):
-                        for _, ref_val in l_dict.items():
-                            if isinstance(ref_val, str):
-                                ref_path = ref_val if ref_val.endswith(".yaml") else f"licenses/{ref_val}.yaml"
-                                self.cfg = _deep_merge(self.cfg, self.tmpl_src._load_logical_path(ref_path))
-                # ---------------------------------------------------------------
+                        local_data.setdefault("licenses", {})
+                        for ek, ref_val in l_dict.items():
+                            refs = ref_val if isinstance(ref_val, (list, tuple)) else [ref_val]
+                            for r in refs:
+                                if isinstance(r, str) and r not in local_data["licenses"]:
+                                    resolved = _resolve_ref(r, "licenses", "license_profile")
+                                    if resolved:
+                                        local_data["licenses"][r] = resolved
 
-                # 4. Merge the local data OVER the resolved templates/profiles
+                # 5. Merge the local data OVER the resolved templates/profiles
                 self.cfg = _deep_merge(self.cfg, local_data)
 
-                # 5. Fix Project Name & Inject into index
+                # 6. Fix Project Name & Inject into index
                 nm = self.project_name or local_data.get("project_name") or local_data.get("project_title") or self.repo.name
                 self.cfg["project_name"] = nm
                 self.cfg["project_slug"] = _slug(nm)
@@ -489,8 +608,8 @@ class ConfigReader:
                 self.cfg["libraries"][self.cfg["project_slug"]] = lib_entry
 
                 # Fallback registry for backward compatibility with aliases
-                profile_ns = local_data.get("profile", "").split("/")[0]
-                if profile_ns:
+                profile_ns = local_data.get("profile", "").split("/")[0] if isinstance(local_data.get("profile"), str) else ""
+                if profile_ns and not profile_ns.startswith("http"):
                     self.cfg["libraries"][_slug(f"{profile_ns}/{nm}")] = lib_entry
 
             except Exception as e:
@@ -639,6 +758,91 @@ class ConfigReader:
         ts["targets"] = test_tgts or []
         self.cfg["deps"], self.cfg["tests"] = dp, ts
 
+        # --- GLOBAL COPYRIGHT, REFERENCE RESOLUTION & JINJA FIX ---
+        import datetime
+        current_year = str(self.cfg.get("date") or "")[:4]
+        if not current_year or len(current_year) < 4:
+            current_year = str(datetime.datetime.now().year)
+
+        self.cfg["year"] = current_year
+        raw_created = str(self.cfg.get("date_created") or "")
+        default_start_year = raw_created[:4] if len(raw_created) >= 4 else current_year
+
+        env = Environment(undefined=StrictUndefined, autoescape=False)
+        def _render_val(val):
+            if isinstance(val, str) and "{{" in val:
+                try: return env.from_string(val).render(**self.cfg)
+                except Exception as e:
+                    print(f"\n⚠️ Warning: Failed to double-render '{val}': {e}", file=sys.stderr)
+                    return val
+            return val
+
+        # Helper to resolve strings like "contributors.knode" into their underlying dictionaries
+        def _resolve_entity_ref(val):
+            if isinstance(val, dict):
+                return dict(val)
+            if isinstance(val, str):
+                if not " " in val and "." in val and not "{{" in val:
+                    parts = val.split(".")
+                    curr = self.cfg
+                    for p in parts:
+                        if isinstance(curr, dict) and p in curr:
+                            curr = curr[p]
+                        else:
+                            return {"entity": val} # Fallback to treating it as a literal string
+                    if isinstance(curr, dict):
+                        return dict(curr)
+                return {"entity": val}
+            return {}
+
+        raw_copyrights = self.cfg.get("copyrights", [])
+        norm_copyrights = []
+        for raw_cp in (raw_copyrights if isinstance(raw_copyrights, list) else [raw_copyrights]):
+            norm_cp = _resolve_entity_ref(raw_cp)
+            if not norm_cp: continue
+
+            # If the referenced dictionary has a 'contact' field but no 'entity' field, map it over seamlessly
+            if "entity" not in norm_cp and "contact" in norm_cp:
+                norm_cp["entity"] = norm_cp["contact"]
+
+            norm_cp["entity"] = _render_val(norm_cp.get("entity", ""))
+            norm_cp["full_entity"] = _render_val(norm_cp.get("full_entity", norm_cp.get("entity", "")))
+
+            # --- CLAMPING LOGIC ---
+            cp_start = str(norm_cp.get("start_year") or default_start_year)
+            if cp_start < default_start_year:
+                cp_start = default_start_year # Clamp to project inception!
+
+            end_year = str(norm_cp.get("end_year") or current_year)
+            norm_cp["year_span"] = f"{cp_start}–{end_year}" if cp_start and cp_start != end_year else end_year
+
+            norm_copyrights.append(norm_cp)
+        self.cfg["copyrights"] = norm_copyrights
+
+        raw_contacts = _coerce_list(self.cfg.get("contacts", []))
+        norm_contacts = []
+        for raw_c in raw_contacts:
+            # 1. Resolve if they passed a raw string (e.g., "- contributors.andy")
+            norm_c = _resolve_entity_ref(raw_c)
+            if not norm_c: continue
+
+            # 2. Resolve if they passed a dictionary with a reference string inside it!
+            if isinstance(norm_c.get("entity"), str) and norm_c["entity"].startswith("contributors."):
+                resolved = _resolve_entity_ref(norm_c["entity"])
+                if resolved:
+                    # Merge the resolved data, but keep the explicitly defined role
+                    role = norm_c.get("role")
+                    norm_c = dict(resolved)
+                    if role: norm_c["role"] = role
+
+            if "entity" not in norm_c and "contact" in norm_c:
+                norm_c["entity"] = norm_c["contact"]
+
+            norm_c["role"] = _render_val(norm_c.get("role", "Maintainer"))
+            norm_c["entity"] = _render_val(norm_c.get("entity", ""))
+            norm_contacts.append(norm_c)
+        self.cfg["contacts"] = norm_contacts
+
     def _build_ctx_inherited(self, key: str | None) -> dict:
         ctx = _deep_merge(self._base_from_cfg(self.cfg), {} if not key or key == "." else (self.cfg.get(key) or {}))
         ctx.setdefault("project_name", self.cfg.get("project_name") or "project")
@@ -646,7 +850,6 @@ class ConfigReader:
         ctx.setdefault("project_snake", _snake(ctx["project_slug"]))
         ctx.setdefault("project_camel", _camel(ctx.get("project_name", "project")))
         ctx.setdefault("project_title", ctx.get("project_title", ctx.get("project_name")))
-        ctx.setdefault("year", str(self.cfg.get("date") or ctx.get("date") or "")[:4] if len(str(self.cfg.get("date") or ctx.get("date") or "")) >= 4 else "2025")
         ctx.setdefault("version", str(self.cfg.get("version") or "0.1.0"))
 
         stack = self.cfg.get("stack", "generic")
@@ -732,7 +935,6 @@ class ConfigReader:
 
     def _expand_library_templates(self) -> None:
         templates = self.cfg.get("library_templates") or {}
-        if not templates: return
         env = Environment(undefined=StrictUndefined, autoescape=False)
         def to_dict(val):
             if isinstance(val, dict): return val
@@ -754,11 +956,22 @@ class ConfigReader:
             if isinstance(raw_libs, dict): lib["name"] = lib.get("name") or posixpath.basename(str(key))
 
             tmpl_name = lib.get("template")
-            if not tmpl_name or tmpl_name not in templates:
+            if not tmpl_name:
                 out[key] = lib
                 continue
 
-            merged = _deep_merge(to_dict(templates[tmpl_name]), lib)
+            tmpl_data = {}
+            if isinstance(tmpl_name, dict):
+                tmpl_data = tmpl_name
+            elif str(tmpl_name).startswith(("http://", "https://")):
+                tmpl_data = _fetch_remote_yaml(str(tmpl_name))
+            elif tmpl_name in templates:
+                tmpl_data = to_dict(templates[tmpl_name])
+            else:
+                out[key] = lib
+                continue
+
+            merged = _deep_merge(tmpl_data, lib)
             nm = str(merged.get("name") or posixpath.basename(str(key))).strip()
             derived = {
                 "slug": _slug(nm), "snake": _snake(nm), "camel": _camel(nm),

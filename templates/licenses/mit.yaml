@@ -5,6 +5,6 @@ spdx: |
   {%- for c in contacts %}
   SPDX-FileCopyrightText: {{ c.role }}: {{ c.entity }}
   {%- endfor %}
-  SPDX-License-Identifier: BSD-3-Clause
+  SPDX-License-Identifier: MIT
 license: LICENSE
-license_canonical: resources/licenses/BSD-3-Clause.txt
+license_canonical: resources/licenses/MIT.txt

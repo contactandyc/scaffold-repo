@@ -1,0 +1,8 @@
+spdx: |
+  SPDX-FileComment: This project is an independent library for interacting with the Google and Google Cloud API.
+  It is not affiliated with, endorsed by, or sponsored by Google.
+  "Google" and related marks are trademarks of Alphabet.
+notice: |
+  NON-AFFILIATION (Google): This software is an independent library for interacting with the Google and Google Cloud API.
+  It is not affiliated with, endorsed by, or sponsored by Google. "Google" and related marks
+  are trademarks of Alphabet.

@@ -1,0 +1,8 @@
+spdx: |
+  SPDX-FileComment: This project is an independent library for interacting with the OpenAI API.
+  It is not affiliated with, endorsed by, or sponsored by OpenAI.
+  "OpenAI" and related marks are trademarks of OpenAI OpCo, LLC.
+notice: |
+  NON-AFFILIATION (OpenAI): This software is an independent library for interacting with the OpenAI API.
+  It is not affiliated with, endorsed by, or sponsored by OpenAI. "OpenAI" and related marks
+  are trademarks of OpenAI OpCo, LLC.
