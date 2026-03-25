@@ -1,4 +1,0 @@
-kind: system
-find_package: "Threads REQUIRED"
-link: "Threads::Threads"
-pkg: build-essential

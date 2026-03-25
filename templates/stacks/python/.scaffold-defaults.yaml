@@ -1,5 +1,0 @@
-init_prompts:
-  - var: stack_type
-    prompt: "Select Python build system:"
-    choices_from_dir: "stacks/{{ stack }}"
-    exclude: ["base"]
