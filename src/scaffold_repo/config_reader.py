@@ -13,55 +13,19 @@ import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+import subprocess
 
 import yaml
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, StrictUndefined
 from .scaffoldrc import find_scaffoldrc
 
+from .utils.text import _slug, _snake, _camel, _sha256
+from .utils.collections import _dedupe, _coerce_list, _deep_merge
+from .utils.git import sync_git_template_repo
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Small, self‑contained utilities (pure, no I/O side effects)
 # ──────────────────────────────────────────────────────────────────────────────
-
-_NON_ALNUM = re.compile(r"[^0-9A-Za-z]+")
-
-def _slug(s: str) -> str:
-    s = s.strip().replace("_", "-")
-    s = _NON_ALNUM.sub("-", s)
-    return re.sub(r"-{2,}", "-", s).strip("-").lower() or "project"
-
-def _snake(s: str) -> str:
-    s = s.strip().replace("-", "_")
-    s = _NON_ALNUM.sub("_", s)
-    return re.sub(r"_{2,}", "_", s).strip("_").lower() or "project"
-
-def _camel(s: str) -> str:
-    parts = re.split(r"[^0-9A-Za-z]+", s)
-    return "".join(p[:1].upper() + p[1:].lower() for p in parts if p) or "Project"
-
-def _sha256(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _coerce_list(x) -> list[Any]:
-    if x is None: return []
-    if isinstance(x, (list, tuple)): return list(x)
-    return [x]
-
-def _dedupe(seq: Iterable[Any]) -> list[Any]:
-    out, seen = [], set()
-    for s in seq:
-        if s in seen: continue
-        seen.add(s)
-        out.append(s)
-    return out
-
-def _deep_merge(a, b):
-    if isinstance(a, list) and isinstance(b, list): return _dedupe(a + b)
-    if not isinstance(a, dict) or not isinstance(b, dict): return b if b is not None else a
-    out = dict(a)
-    for k, v in b.items():
-        out[k] = _deep_merge(out.get(k), v)
-    return out
-
 def _ensure_trailing_newline(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     if not s.endswith("\n"): return s + "\n"
@@ -73,18 +37,19 @@ def _diff(old: bytes, new: bytes, path: str) -> str:
     new_lines = new.decode("utf-8", errors="replace").splitlines(keepends=True)
     return "".join(difflib.unified_diff(old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}"))
 
-def _fetch_remote_yaml(url: str) -> dict:
-    """Fetches and caches YAML directly from HTTP/HTTPS or Git URLs."""
+def _fetch_remote_yaml(url: str, ref: str | None = None, file_path: str | None = None) -> dict:
     if not url.startswith(("http://", "https://")):
         return {}
 
-    # Smart transformation: Convert github repo URLs directly to raw scaffold.yaml
+    ref = ref or "main"
+    target_file = file_path or "scaffold.yaml"
+
     if url.endswith(".git") and "github.com" in url:
         parts = url.replace(".git", "").split("github.com/")[-1].split("/")
         if len(parts) >= 2:
-            url = f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/main/scaffold.yaml"
+            url = f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/{ref}/{target_file}"
 
-    cache_key = hashlib.md5(url.encode('utf-8')).hexdigest()
+    cache_key = hashlib.md5(f"{url}@{ref}/{target_file}".encode('utf-8')).hexdigest()
     cache_file = Path.home() / ".cache" / "scaffold-repo" / "urls" / f"{cache_key}.yaml"
 
     if cache_file.exists():
@@ -183,11 +148,7 @@ def _normalize_for_cmp(text: str, path: Path, header_managed: bool) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TemplateSource:
-    def __init__(self, fs_dir: Path | None = None, base_dir: Path | None = None, pkg_rel: str | None = "templates"):
-        # fs_dir acts as the Local Overlay
-        self.fs_dir: Path | None = fs_dir if (fs_dir and fs_dir.is_dir()) else None
-
-        # _pkg_root acts as the Base Registry
+    def __init__(self, base_dir: Path | None = None, pkg_rel: str | None = "templates"):
         self._pkg_root = base_dir if (base_dir and base_dir.is_dir()) else None
 
         if self._pkg_root is None and pkg_rel:
@@ -217,13 +178,39 @@ class TemplateSource:
                 if part: tgt = tgt.joinpath(part)
             if tgt.is_dir(): scan_node(tgt, clean_prefix)
 
-        if self.fs_dir:
-            tgt = self.fs_dir
-            for part in clean_prefix.split("/"):
-                if part: tgt = tgt / part
-            if tgt.is_dir(): scan_node(tgt, clean_prefix)
-
         return _dedupe(out)
+
+    def get_stacked_defaults(self, rel_path: str) -> dict:
+        """Cascades .scaffold-defaults.yaml from the root down to the target directory."""
+        if not hasattr(self, "_defaults_cache"):
+            self._defaults_cache = {}
+
+        dir_path = posixpath.dirname(rel_path)
+        if dir_path in self._defaults_cache:
+            return dict(self._defaults_cache[dir_path])
+
+        parts = dir_path.split("/") if dir_path else []
+        stacked = {}
+        current = ""
+
+        paths_to_check = [".scaffold-defaults.yaml"]
+        for p in parts:
+            if not p or p == ".": continue
+            current = f"{current}/{p}" if current else p
+            paths_to_check.append(f"{current}/.scaffold-defaults.yaml")
+
+        for pth in paths_to_check:
+            text = self.read_resource_text(pth)
+            if text:
+                try:
+                    data = yaml.safe_load(text) or {}
+                    if isinstance(data, dict):
+                        stacked = _deep_merge(stacked, data)
+                except Exception:
+                    pass
+
+        self._defaults_cache[dir_path] = stacked
+        return dict(stacked)
 
     def _load_logical_path(self, rel_path: str, seen: set[str] | None = None) -> dict:
         if seen is None: seen = set()
@@ -242,9 +229,41 @@ class TemplateSource:
             except Exception:
                 return {}
 
-            includes = data.pop("includes", [])
-            if not isinstance(includes, list): includes = [includes]
             root_data = data.pop("root", {}) if isinstance(data, dict) else {}
+            if root_data: data = _deep_merge(root_data, data)
+
+            raw_includes = data.pop("includes", [])
+            if not isinstance(raw_includes, list): raw_includes = [raw_includes]
+
+            base = self.get_stacked_defaults(rel_path)
+            for inc in raw_includes:
+                if isinstance(inc, str):
+                    inc = {"source": inc}
+
+                source = inc.get("source") or inc.get("repo")
+                if not source: continue
+
+                ref = inc.get("ref") or inc.get("branch") or inc.get("tag")
+                file_path = inc.get("file")
+                include_keys = _coerce_list(inc.get("include", []))
+                exclude_keys = _coerce_list(inc.get("exclude", []))
+
+                inc_data = {}
+                if source.startswith(("http://", "https://")):
+                    inc_data = _fetch_remote_yaml(source, ref=ref, file_path=file_path)
+                else:
+                    inc_str = str(source)
+                    if not inc_str.endswith((".yaml", ".yml")):
+                        inc_str += ".yaml"
+                    inc_data = self._load_logical_path(inc_str, seen_next)
+
+                if isinstance(inc_data, dict):
+                    if include_keys:
+                        inc_data = {k: v for k, v in inc_data.items() if k in include_keys}
+                    if exclude_keys:
+                        inc_data = {k: v for k, v in inc_data.items() if k not in exclude_keys}
+
+                base = _deep_merge(base, inc_data)
 
             rel_no_ext = posixpath.splitext(rel_path)[0]
             parts = rel_no_ext.split("/", 1)
@@ -253,75 +272,15 @@ class TemplateSource:
                 key = parts[1]
                 if folder not in data: data = {folder: {key: data}}
 
-            if root_data: data = _deep_merge(root_data, data)
-
-            def _process_ref(ref: Any, default_folder: str = "", add_include: bool = True) -> Any:
-                if isinstance(ref, dict): return ref # Federated inline dict
-                if not isinstance(ref, str): return ref
-                if ref.startswith(("http://", "https://")): # Federated URL
-                    if add_include and ref not in includes: includes.append(ref)
-                    return ref
-
-                is_ref = ("/" in ref) or ref.endswith((".yaml", ".yml")) or bool(default_folder)
-                if is_ref:
-                    inc_path = ref if ref.endswith((".yaml", ".yml")) else f"{ref}.yaml"
-                    if default_folder and not inc_path.startswith((f"{default_folder}/", "./", "../", "/")):
-                        inc_path = f"{default_folder}/{inc_path}"
-
-                    if add_include and inc_path not in includes: includes.append(inc_path)
-
-                    ret_key = posixpath.splitext(inc_path)[0]
-                    if default_folder and ret_key.startswith(f"{default_folder}/"): ret_key = ret_key[len(default_folder)+1:]
-                    elif default_folder == "library-templates" and ret_key.startswith("library_templates/"): ret_key = ret_key[len("library_templates/"):]
-                    elif default_folder == "app-templates" and ret_key.startswith("app_templates/"): ret_key = ret_key[len("app_templates/"):]
-                    return ret_key
-                return ref
-
-            if "profile" in data: data["profile"] = _process_ref(data["profile"], "profiles")
-            if "license_profile" in data: data["license_profile"] = _process_ref(data["license_profile"], "licenses")
-
-            for folder_key in ["libraries", "apps", "licenses", "library_templates", "app_templates"]:
+            for folder_key in ["libraries", "apps"]:
                 raw_dict = data.get(folder_key)
                 if isinstance(raw_dict, dict):
                     new_dict = {}
                     for k, v in raw_dict.items():
-                        clean_name = str(k)
-                        if isinstance(v, dict):
-                            if "name" not in v: v["name"] = posixpath.basename(clean_name)
-                            if "template" in v: v["template"] = _process_ref(v["template"], "library-templates" if folder_key=="libraries" else "app-templates")
-                            if "profile" in v: v["profile"] = _process_ref(v["profile"], "profiles")
-                            if "license_profile" in v: v["license_profile"] = _process_ref(v["license_profile"], "licenses")
-                            if "depends_on" in v: v["depends_on"] = [_process_ref(d, "libraries", add_include=False) for d in _coerce_list(v["depends_on"])]
-
-                            if "license_extras" in v and isinstance(v["license_extras"], dict):
-                                v["license_extras"] = {ek: _process_ref(ev, "licenses") for ek, ev in v["license_extras"].items()}
-                            if "license_overrides" in v and isinstance(v["license_overrides"], dict):
-                                v["license_overrides"] = {ek: _process_ref(ev, "licenses") for ek, ev in v["license_overrides"].items()}
-
-                            if "binaries" in v and isinstance(v["binaries"], list):
-                                for b in v["binaries"]:
-                                    if isinstance(b, dict):
-                                        for bk, bv in b.items():
-                                            if isinstance(bv, dict) and "depends_on" in bv:
-                                                bv["depends_on"] = [_process_ref(d, "libraries", add_include=False) for d in _coerce_list(bv["depends_on"])]
-                        new_dict[clean_name] = v
+                        if isinstance(v, dict) and "name" not in v:
+                            v["name"] = posixpath.basename(str(k))
+                        new_dict[str(k)] = v
                     data[folder_key] = new_dict
-
-            base = {}
-            for inc in includes:
-                if not inc: continue
-                inc_str = str(inc)
-                if inc_str.startswith(("http://", "https://")):
-                    inc_data = _fetch_remote_yaml(inc_str)
-                    base = _deep_merge(base, inc_data)
-                    continue
-
-                if inc_str.startswith("/"): new_rel = posixpath.normpath(inc_str.lstrip("/"))
-                elif inc_str.startswith("./") or inc_str.startswith("../"): new_rel = posixpath.normpath(posixpath.join(posixpath.dirname(rel_path), inc_str))
-                else: new_rel = posixpath.normpath(inc_str)
-
-                inc_data = self._load_logical_path(new_rel, seen_next)
-                base = _deep_merge(base, inc_data)
 
             return _deep_merge(base, data)
 
@@ -334,20 +293,12 @@ class TemplateSource:
                 if cand.is_file(): pkg_data = parse_and_resolve(cand)
             except Exception: pass
 
-        fs_data = {}
-        if self.fs_dir:
-            cand = (self.fs_dir / rel_path).resolve()
-            try:
-                cand.relative_to(self.fs_dir)
-                if cand.is_file(): fs_data = parse_and_resolve(cand)
-            except ValueError: pass
-
-        if not pkg_data and not fs_data:
+        if not pkg_data:
             actual_basename = posixpath.basename(rel_path)
             if actual_basename != ".scaffold-defaults.yaml" and rel_path != ".scaffold-defaults.yaml":
-                print(f"Warning: Included file '{rel_path}' not found in templates or overlay.", file=sys.stderr)
+                print(f"Warning: Included file '{rel_path}' not found in templates.", file=sys.stderr)
 
-        return _deep_merge(pkg_data, fs_data)
+        return pkg_data
 
     def iter_files(self):
         SKIP_DIRS = {"libraries", "apps", "profiles", "licenses", "library-templates", "app-templates"}
@@ -362,20 +313,6 @@ class TemplateSource:
                     if child.is_file(): files_map[rel] = (child.read_bytes(), rel.endswith(".j2"), "pkg", child)
                     elif child.is_dir(): walk(child, rel + "/")
             walk(self._pkg_root)
-
-        if self.fs_dir:
-            def walk_fs(dir_path, prefix=""):
-                try:
-                    for entry in os.scandir(dir_path):
-                        if entry.is_dir(follow_symlinks=False):
-                            if not prefix and entry.name in SKIP_DIRS: continue
-                            walk_fs(entry.path, f"{prefix}{entry.name}/")
-                        elif entry.is_file(follow_symlinks=False):
-                            rel = f"{prefix}{entry.name}"
-                            with open(entry.path, "rb") as f:
-                                files_map[rel] = (f.read(), rel.endswith(".j2"), "fs", Path(entry.path))
-                except PermissionError: pass
-            walk_fs(self.fs_dir)
 
         for rel, (data, is_j2, origin, _path) in files_map.items():
             yield rel, data, is_j2, origin
@@ -419,7 +356,6 @@ class PlanItem:
     executable: bool = False
 
 def _extract_dep_name(raw_dep: Any) -> str:
-    """Helper to extract the base name from a URL or expanded dependency dict."""
     if isinstance(raw_dep, dict):
         if len(raw_dep) == 1:
             k = next(iter(raw_dep))
@@ -434,18 +370,11 @@ def _extract_dep_name(raw_dep: Any) -> str:
 
 
 class ConfigReader:
-    def __init__(self, repo: Path, *, project_name: str | None = None, templates_dir: str | None = None, base_templates_dir: str | None = None, is_init: bool = False):
+    def __init__(self, repo: Path, *, project_name: str | None = None, base_templates_dir: str | None = None, is_init: bool = False):
         self.repo = repo.resolve()
         self.cfg: dict = {}
         self.project_name: str | None = project_name
-        self.templates_dir = templates_dir
         self.is_init = is_init
-
-        fs_dir = None
-        if templates_dir:
-            fs_dir = Path(templates_dir)
-            if not fs_dir.is_absolute(): fs_dir = (self.repo / fs_dir)
-            fs_dir = fs_dir.resolve()
 
         base_dir = None
         if base_templates_dir:
@@ -453,22 +382,54 @@ class ConfigReader:
             if not base_dir.is_absolute(): base_dir = (self.repo / base_dir)
             base_dir = base_dir.resolve()
 
-        # The magic happens here: the overlay and the base are unified!
-        self.tmpl_src = TemplateSource(fs_dir=fs_dir, base_dir=base_dir, pkg_rel="templates")
+        self.tmpl_src = TemplateSource(base_dir=base_dir, pkg_rel="templates")
         self.enabled_packages: set[str] = set()
         self.package_patterns: dict[str, list[str]] = {}
 
     def load(self) -> None:
-        self.cfg = self.tmpl_src.load_defaults_yaml() or {}
+        local_manifest = self.repo / "scaffold.yaml"
+        local_data = {}
 
         rc_cfg = find_scaffoldrc(self.repo)
+        ws_dir = Path(rc_cfg.get("workspace_dir") or self.repo.parent).resolve()
+
+        url = None
+        ref = "main"
+        custom_path = None
+
+        if local_manifest.exists():
+            try:
+                local_data = yaml.safe_load(local_manifest.read_text(encoding="utf-8")) or {}
+            except Exception as e:
+                print(f"Warning: Failed to parse local {local_manifest}:\n{e}", file=sys.stderr)
+
+            base_tmpl = local_data.get("base_templates")
+            if isinstance(base_tmpl, dict) and "repo" in base_tmpl:
+                url = base_tmpl["repo"]
+                ref = base_tmpl.get("ref", "main")
+                custom_path = base_tmpl.get("path")
+
+        if not url and rc_cfg.get("template_registry_url"):
+            url = rc_cfg.get("template_registry_url")
+            ref = rc_cfg.get("template_registry_ref", "main")
+
+        if url:
+            cached_dir = sync_git_template_repo(url, ref, ws_dir)
+            if cached_dir:
+                if custom_path:
+                    new_base = cached_dir / custom_path
+                    if not new_base.is_dir():
+                        print(f"Warning: base_templates path '{custom_path}' not found in {url}@{ref}. Falling back to root.", file=sys.stderr)
+                        new_base = cached_dir
+                else:
+                    new_base = cached_dir / "templates" if (cached_dir / "templates").is_dir() else cached_dir
+
+                self.tmpl_src = TemplateSource(base_dir=new_base)
+
+        self.cfg = self.tmpl_src.load_defaults_yaml() or {}
+
         if rc_cfg.get("workspace_dir"):
             self.cfg["workspace_dir"] = rc_cfg["workspace_dir"]
-
-        for f in self.tmpl_src.find_registry_yamls("profiles"):
-            data = self.tmpl_src._load_logical_path(f)
-            if data:
-                self.cfg = _deep_merge(self.cfg, data)
 
         for f in self.tmpl_src.find_registry_yamls("libraries"):
             data = self.tmpl_src._load_logical_path(f)
@@ -482,138 +443,68 @@ class ConfigReader:
                 self.cfg.setdefault("apps", {})
                 self.cfg["apps"] = _deep_merge(self.cfg["apps"], data["apps"])
 
+        for f in self.tmpl_src.find_registry_yamls("licenses"):
+            data = self.tmpl_src._load_logical_path(f)
+            if data and "licenses" in data:
+                self.cfg.setdefault("licenses", {})
+                self.cfg["licenses"] = _deep_merge(self.cfg["licenses"], data["licenses"])
+
         self._select_project()
 
-        # --- LOCAL MANIFEST OVERRIDE ---
-        local_manifest = self.repo / "scaffold.yaml"
-        if local_manifest.exists():
-            try:
-                local_data = yaml.safe_load(local_manifest.read_text(encoding="utf-8")) or {}
+        if local_data:
+            raw_includes = local_data.pop("includes", [])
+            if not isinstance(raw_includes, list): raw_includes = [raw_includes]
 
-                # --- The Recursive Reference Resolver with Path Extraction & INLINE REGISTRIES ---
-                def _resolve_ref(ref_val: Any, category: str, expected_key: str, seen_urls: set = None) -> dict:
-                    if seen_urls is None:
-                        seen_urls = set()
+            base = {}
+            for inc in raw_includes:
+                if isinstance(inc, str):
+                    inc = {"source": inc}
 
-                    result = {}
+                source = inc.get("source") or inc.get("repo")
+                if not source: continue
 
-                    # 1. Inline Dictionary
-                    if isinstance(ref_val, dict):
-                        result = dict(ref_val)
-                        if expected_key in result and isinstance(result[expected_key], str):
-                            base_resolved = _resolve_ref(result.pop(expected_key), category, expected_key, seen_urls)
-                            result = _deep_merge(base_resolved, result)
+                ref = inc.get("ref") or inc.get("branch") or inc.get("tag")
+                file_path = inc.get("file")
+                include_keys = _coerce_list(inc.get("include", []))
+                exclude_keys = _coerce_list(inc.get("exclude", []))
 
-                    # 2. Strings (Remote, Local, or Inline Registry)
-                    elif isinstance(ref_val, str):
-                        actual_url = ref_val.split("+", 1)[-1].strip() if "+" in ref_val else ref_val.strip()
+                inc_data = {}
+                if source.startswith(("http://", "https://")):
+                    inc_data = _fetch_remote_yaml(source, ref=ref, file_path=file_path)
+                else:
+                    inc_str = str(source)
+                    if not inc_str.endswith((".yaml", ".yml")):
+                        inc_str += ".yaml"
+                    inc_data = self.tmpl_src._load_logical_path(inc_str)  # <-- TYPO FIXED HERE
 
-                        # --- NEW: Check the Inline Registry FIRST ---
-                        # This allows the user to define 'licenses:', 'apps:', etc., directly in scaffold.yaml
-                        inline_registry = local_data.get(category) or local_data.get(category.replace("-", "_"))
-                        inline_match = None
+                if isinstance(inc_data, dict):
+                    if include_keys:
+                        inc_data = {k: v for k, v in inc_data.items() if k in include_keys}
+                    if exclude_keys:
+                        inc_data = {k: v for k, v in inc_data.items() if k not in exclude_keys}
 
-                        if isinstance(inline_registry, list):
-                            for item in inline_registry:
-                                if isinstance(item, dict) and item.get("name") == ref_val:
-                                    inline_match = {k: v for k, v in item.items() if k != "name"}
-                                    break
-                        elif isinstance(inline_registry, dict):
-                            if ref_val in inline_registry:
-                                inline_match = dict(inline_registry[ref_val])
+                base = _deep_merge(base, inc_data)
 
-                        if inline_match is not None:
-                            # Treat the inline definition just like a standalone file!
-                            result = _resolve_ref(inline_match, category, expected_key, seen_urls)
+            self.cfg = _deep_merge(self.cfg, base)
+            self.cfg = _deep_merge(self.cfg, local_data)
 
-                        # --- Remote URLs ---
-                        elif actual_url.startswith(("http://", "https://", "git@")):
-                            extract_path = ref_val.split("+", 1)[0].strip() if "+" in ref_val else expected_key
+            raw_stack = str(self.cfg.get("stack") or "").strip()
+            if raw_stack:
+                st = raw_stack.split("/")[0].lower()
+                st_type = raw_stack.split("/")[1].lower() if "/" in raw_stack else "base"
+                stack_defaults = self.tmpl_src.get_stacked_defaults(f"stacks/{st}/{st_type}/_")
+                self.cfg = _deep_merge(stack_defaults, self.cfg)  # Local Config wins over defaults
 
-                            if actual_url in seen_urls: return {}
-                            seen_urls.add(actual_url)
+            nm = self.project_name or local_data.get("project_name") or local_data.get("project_title") or self.repo.name
+            self.cfg["project_name"] = nm
+            self.cfg["project_slug"] = _slug(nm)
+            self.cfg["project_snake"] = local_data.get("project_snake") or _snake(nm) or nm
+            self.cfg["project_camel"] = local_data.get("project_camel") or _camel(nm)
 
-                            raw_data = _fetch_remote_yaml(actual_url)
-
-                            if extract_path == "root": extracted = raw_data
-                            else:
-                                keys = extract_path.split(".")
-                                curr = raw_data
-                                for k in keys:
-                                    if isinstance(curr, dict) and k in curr: curr = curr[k]
-                                    else:
-                                        curr = {}
-                                        break
-                                extracted = curr
-
-                            if isinstance(extracted, str):
-                                result = _resolve_ref(extracted, category, expected_key, seen_urls)
-                            elif isinstance(extracted, dict):
-                                clean_data = dict(extracted)
-                                for k in ["apps", "deps", "depends_on", "project_name", "project_title", "project_slug", "project_snake", "version", "libraries"]:
-                                    clean_data.pop(k, None)
-                                result = clean_data
-
-                        # --- Local Filesystem Fallback ---
-                        else:
-                            ref_path = ref_val if ref_val.endswith((".yaml", ".yml")) else f"{category}/{ref_val}.yaml"
-                            result = self.tmpl_src._load_logical_path(ref_path)
-
-                    # 3. Elevate 'root' to top level
-                    if isinstance(result, dict) and "root" in result and isinstance(result["root"], dict):
-                        root_data = result.pop("root")
-                        result = _deep_merge(root_data, result)
-
-                    return result
-
-                # 1. Resolve template inheritance
-                if "template" in local_data:
-                    self.cfg = _deep_merge(self.cfg, _resolve_ref(local_data["template"], "library-templates", "template"))
-
-                # 2. Resolve profile inheritance
-                if "profile" in local_data:
-                    self.cfg = _deep_merge(self.cfg, _resolve_ref(local_data["profile"], "profiles", "profile"))
-
-                # 3. Resolve base license profile
-                if "license_profile" in local_data:
-                    self.cfg = _deep_merge(self.cfg, _resolve_ref(local_data["license_profile"], "licenses", "license_profile"))
-
-                # 4. Resolve explicit license extras/overrides safely!
-                # Keep the keys as strings for repo_sync to find, but load the data into the licenses registry!
-                for l_key in ("license_extras", "license_overrides"):
-                    l_dict = local_data.get(l_key)
-                    if isinstance(l_dict, dict):
-                        local_data.setdefault("licenses", {})
-                        for ek, ref_val in l_dict.items():
-                            refs = ref_val if isinstance(ref_val, (list, tuple)) else [ref_val]
-                            for r in refs:
-                                if isinstance(r, str) and r not in local_data["licenses"]:
-                                    resolved = _resolve_ref(r, "licenses", "license_profile")
-                                    if resolved:
-                                        local_data["licenses"][r] = resolved
-
-                # 5. Merge the local data OVER the resolved templates/profiles
-                self.cfg = _deep_merge(self.cfg, local_data)
-
-                # 6. Fix Project Name & Inject into index
-                nm = self.project_name or local_data.get("project_name") or local_data.get("project_title") or self.repo.name
-                self.cfg["project_name"] = nm
-                self.cfg["project_slug"] = _slug(nm)
-                self.cfg["project_snake"] = local_data.get("project_snake") or _snake(nm) or nm
-                self.cfg["project_camel"] = local_data.get("project_camel") or _camel(nm)
-
-                self.cfg.setdefault("libraries", {})
-                lib_entry = dict(local_data)
-                lib_entry["name"] = nm
-                self.cfg["libraries"][self.cfg["project_slug"]] = lib_entry
-
-                # Fallback registry for backward compatibility with aliases
-                profile_ns = local_data.get("profile", "").split("/")[0] if isinstance(local_data.get("profile"), str) else ""
-                if profile_ns and not profile_ns.startswith("http"):
-                    self.cfg["libraries"][_slug(f"{profile_ns}/{nm}")] = lib_entry
-
-            except Exception as e:
-                print(f"Warning: Failed to parse local {local_manifest}:\n{e}", file=sys.stderr)
+            self.cfg.setdefault("libraries", {})
+            lib_entry = dict(local_data)
+            lib_entry["name"] = nm
+            self.cfg["libraries"][self.cfg["project_slug"]] = lib_entry
 
         self._render_contributors()
         self._normalize_keys_autofill()
@@ -644,7 +535,6 @@ class ConfigReader:
             ctx = self._build_ctx_inherited(it["context"])
             new_text = self._render_with_help(env, it, ctx)
 
-            # --- THE FIX: Render the destination path through Jinja! ---
             try:
                 rendered_dest = env.from_string(it["dest"]).render(**ctx)
             except Exception:
@@ -723,7 +613,6 @@ class ConfigReader:
         if not self.cfg.get("project_name"): self.cfg["project_name"] = picked.get("name") or proj_base
 
     def _normalize_keys_autofill(self) -> None:
-        # --- NEW: Normalize root stack shorthand (e.g., stack: "c/cmake") ---
         raw_stack = str(self.cfg.get("stack") or "").strip()
         if "/" in raw_stack:
             st, st_type = raw_stack.split("/", 1)
@@ -738,11 +627,17 @@ class ConfigReader:
 
         dp = dict(self.cfg.get("deps") or {})
         ts = dict(self.cfg.get("tests") or {})
+
+        ps = self.cfg.get("project_snake") or "project"
+
         lib_srcs = self.cfg.get("library_sources") or dp.get("sources")
         if not lib_srcs:
-            exts = {".c", ".cc"}
+            exts = {".c", ".cc", ".cpp", ".cxx"}
             src_root = self.repo / "src"
-            auto = [p.relative_to(self.repo).as_posix() for p in src_root.rglob("*") if p.is_file() and p.suffix.lower() in exts] if src_root.is_dir() else []
+            if self.is_init and not src_root.exists():
+                auto = [f"src/{ps}.c"]
+            else:
+                auto = [p.relative_to(self.repo).as_posix() for p in src_root.rglob("*") if p.is_file() and p.suffix.lower() in exts] if src_root.is_dir() else []
             if auto: lib_srcs = sorted(auto)
 
         norm_srcs = [str(s) for s in (lib_srcs if isinstance(lib_srcs, (list, tuple)) else [lib_srcs])] if lib_srcs else []
@@ -751,14 +646,16 @@ class ConfigReader:
         test_tgts = self.cfg.get("test_targets") or ts.get("test_targets") or ts.get("targets")
         if not test_tgts:
             tests_src = self.repo / "tests" / "src"
-            exts = {".c", ".cc"}
-            auto = [{"name": p.stem, "sources": [f"src/{p.name}"]} for p in tests_src.glob("test_*") if p.is_file() and p.suffix.lower() in exts] if tests_src.is_dir() else []
+            exts = {".c", ".cc", ".cpp", ".cxx"}
+            if self.is_init and not tests_src.exists():
+                auto = [{"name": f"test_{ps}", "sources": [f"src/test_{ps}.c"]}]
+            else:
+                auto = [{"name": p.stem, "sources": [f"src/{p.name}"]} for p in tests_src.glob("test_*") if p.is_file() and p.suffix.lower() in exts] if tests_src.is_dir() else []
             test_tgts = sorted(auto, key=lambda t: t["name"]) if auto else []
 
         ts["targets"] = test_tgts or []
         self.cfg["deps"], self.cfg["tests"] = dp, ts
 
-        # --- GLOBAL COPYRIGHT, REFERENCE RESOLUTION & JINJA FIX ---
         import datetime
         current_year = str(self.cfg.get("date") or "")[:4]
         if not current_year or len(current_year) < 4:
@@ -777,7 +674,6 @@ class ConfigReader:
                     return val
             return val
 
-        # Helper to resolve strings like "contributors.knode" into their underlying dictionaries
         def _resolve_entity_ref(val):
             if isinstance(val, dict):
                 return dict(val)
@@ -789,7 +685,7 @@ class ConfigReader:
                         if isinstance(curr, dict) and p in curr:
                             curr = curr[p]
                         else:
-                            return {"entity": val} # Fallback to treating it as a literal string
+                            return {"entity": val}
                     if isinstance(curr, dict):
                         return dict(curr)
                 return {"entity": val}
@@ -801,17 +697,15 @@ class ConfigReader:
             norm_cp = _resolve_entity_ref(raw_cp)
             if not norm_cp: continue
 
-            # If the referenced dictionary has a 'contact' field but no 'entity' field, map it over seamlessly
             if "entity" not in norm_cp and "contact" in norm_cp:
                 norm_cp["entity"] = norm_cp["contact"]
 
             norm_cp["entity"] = _render_val(norm_cp.get("entity", ""))
             norm_cp["full_entity"] = _render_val(norm_cp.get("full_entity", norm_cp.get("entity", "")))
 
-            # --- CLAMPING LOGIC ---
             cp_start = str(norm_cp.get("start_year") or default_start_year)
             if cp_start < default_start_year:
-                cp_start = default_start_year # Clamp to project inception!
+                cp_start = default_start_year
 
             end_year = str(norm_cp.get("end_year") or current_year)
             norm_cp["year_span"] = f"{cp_start}–{end_year}" if cp_start and cp_start != end_year else end_year
@@ -822,15 +716,12 @@ class ConfigReader:
         raw_contacts = _coerce_list(self.cfg.get("contacts", []))
         norm_contacts = []
         for raw_c in raw_contacts:
-            # 1. Resolve if they passed a raw string (e.g., "- contributors.andy")
             norm_c = _resolve_entity_ref(raw_c)
             if not norm_c: continue
 
-            # 2. Resolve if they passed a dictionary with a reference string inside it!
             if isinstance(norm_c.get("entity"), str) and norm_c["entity"].startswith("contributors."):
                 resolved = _resolve_entity_ref(norm_c["entity"])
                 if resolved:
-                    # Merge the resolved data, but keep the explicitly defined role
                     role = norm_c.get("role")
                     norm_c = dict(resolved)
                     if role: norm_c["role"] = role
@@ -864,6 +755,9 @@ class ConfigReader:
         ctx.setdefault("deps", self.cfg.get("deps") or {})
         ctx.setdefault("tests", self.cfg.get("tests") or {})
         ctx.setdefault("test_targets", (self.cfg.get("tests") or {}).get("test_targets") or (self.cfg.get("tests") or {}).get("targets") or [])
+
+        ctx.setdefault("kind", "compiled")
+        ctx.setdefault("is_cli_app", "Library")
         return ctx
 
     def _plan_apps_resources(self, *, show_diffs: bool) -> list[PlanItem]:
@@ -879,7 +773,6 @@ class ConfigReader:
             dest_dir = ctx.get("_apps_dest_dir") or self._compute_app_dest_dir(str((apps.get("context") or {}).get("dest") or "apps"), ctx.get("dest"), ctx_name)
             rctx = _deep_merge(base, ctx)
 
-            # --- Shorthand splitting for Apps ---
             raw_stack = str(ctx.get("stack") or self.cfg.get("stack", "")).strip()
             raw_type = str(ctx.get("stack_type") or self.cfg.get("stack_type", "")).strip()
 
@@ -894,6 +787,9 @@ class ConfigReader:
             if not app_stack_type:
                 app_stack_type = raw_type.lower() or "base"
 
+            app_defaults = self.tmpl_src.get_stacked_defaults(f"stacks/{app_stack}/{app_stack_type}/_")
+            rctx = _deep_merge(app_defaults, rctx)
+
             active_prefix = f"app-resources/{app_stack}/{app_stack_type}/" if app_stack and app_stack_type else None
             global_prefix = "app-resources/global/"
 
@@ -905,7 +801,7 @@ class ConfigReader:
             if app_scoped_key in self.cfg:
                 rctx = _deep_merge(rctx, self.cfg[app_scoped_key])
 
-            rctx.setdefault("app_project_name", f"{base.get('project_name','project')}_{ctx_name}")
+            rctx.setdefault("app_project_name", f"{base.get('project_snake','project')}_{ctx_name}")
             rctx.setdefault("app_stack", app_stack)
             rctx.setdefault("app_stack_type", app_stack_type)
 
@@ -928,8 +824,12 @@ class ConfigReader:
                 cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
                 status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
                 diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
+
                 is_exec = False
-                if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): is_exec = os.access(src_path, os.X_OK)
+                if hasattr(origin, "exists") and origin.exists():
+                    import os
+                    is_exec = os.access(origin, os.X_OK)
+
                 plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, True, diff_text, new_bytes, tmpl_sha, f"apps.{ctx_name}", hm, is_exec))
         return plan
 
@@ -1026,7 +926,6 @@ class ConfigReader:
         if not workspace_dir.is_absolute():
             workspace_dir = (self.repo / workspace_dir).resolve()
 
-        # Pre-seed the index with ALL dependencies safely
         all_explicit_deps = []
         for v in idx.values(): all_explicit_deps.extend(v["depends_raw"])
 
@@ -1034,20 +933,20 @@ class ConfigReader:
         if isinstance(tests_cfg, dict):
             all_explicit_deps.extend(_coerce_list(tests_cfg.get("depends_on", [])))
             for t in (tests_cfg.get("targets") or []):
-                if isinstance(t, dict): # TYPE SAFETY FIX
+                if isinstance(t, dict):
                     all_explicit_deps.extend(_coerce_list(t.get("depends_on", [])))
 
         apps_cfg = self.cfg.get("apps", {})
         if isinstance(apps_cfg, dict):
             app_ctx = apps_cfg.get("context", {})
-            if isinstance(app_ctx, dict): # TYPE SAFETY FIX
+            if isinstance(app_ctx, dict):
                 all_explicit_deps.extend(_coerce_list(app_ctx.get("depends_on", [])))
 
             for app_name, app_cfg in apps_cfg.items():
                 if isinstance(app_cfg, dict):
                     all_explicit_deps.extend(_coerce_list(app_cfg.get("depends_on", [])))
                     for b in (app_cfg.get("binaries") or []):
-                        if isinstance(b, dict): # TYPE SAFETY FIX
+                        if isinstance(b, dict):
                             all_explicit_deps.extend(_coerce_list(b.get("depends_on", [])))
 
         def _synthesize(d_raw):
@@ -1091,7 +990,6 @@ class ConfigReader:
 
         for d in _dedupe(all_explicit_deps): _synthesize(d)
 
-        # BFS Crawler
         to_process = list(idx.keys())
         processed = set()
         while to_process:
@@ -1138,14 +1036,14 @@ class ConfigReader:
             if isinstance(tests_cfg, dict):
                 test_deps.extend(_coerce_list(tests_cfg.get("depends_on", [])))
                 for t in (tests_cfg.get("targets") or []):
-                    if isinstance(t, dict): # TYPE SAFETY FIX
+                    if isinstance(t, dict):
                         test_deps.extend(_coerce_list(t.get("depends_on", [])))
             all_roots.extend(self._resolve_dep_names_to_lib_slugs(test_deps, idx))
 
             apps_cfg = self.cfg.get("apps") or {}
             if isinstance(apps_cfg, dict):
                 app_ctx = apps_cfg.get("context", {})
-                if isinstance(app_ctx, dict): # TYPE SAFETY FIX
+                if isinstance(app_ctx, dict):
                     all_roots.extend(self._resolve_dep_names_to_lib_slugs(_coerce_list(app_ctx.get("depends_on", [])), idx))
 
                 for app_name, app_cfg in apps_cfg.items():
@@ -1154,7 +1052,7 @@ class ConfigReader:
                     if isinstance(app_cfg, dict):
                         app_deps = _coerce_list(app_cfg.get("depends_on", []))
                         for b in (app_cfg.get("binaries") or []):
-                            if isinstance(b, dict): # TYPE SAFETY FIX
+                            if isinstance(b, dict):
                                 app_deps.extend(_coerce_list(b.get("depends_on", [])))
                         all_roots.extend(self._resolve_dep_names_to_lib_slugs(app_deps, idx))
 
@@ -1377,7 +1275,6 @@ class ConfigReader:
         matched = {pkg for pkg, pats in self.package_patterns.items() for pat in pats if fnmatch.fnmatch(rel, pat)}
         return bool(matched) and not any(pkg in self.enabled_packages for pkg in matched)
 
-        # --- THE FIX: Hard boundary for the stacks/ directory ---
     def _is_valid_stack_rel(self, rel: str) -> bool:
         if not rel.startswith("stacks/"): return True
         stack = self.cfg.get("stack")
@@ -1392,7 +1289,6 @@ class ConfigReader:
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
             if not is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
 
-            # --- THE FIX: Drop foreign stacks ---
             if not self._is_valid_stack_rel(rel): continue
 
             text = data.decode("utf-8", errors="replace")
@@ -1402,9 +1298,16 @@ class ConfigReader:
                 continue
 
             dest = (meta or {}).get("dest") or self._strip_package_prefix(rel)[:-3]
-            if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
-            executable = False
-            if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): executable = os.access(src_path, os.X_OK)
+
+            # --- THE TEST EXCLUSION OVERRIDE FOR DAY 0 ---
+            if dest.startswith("tests/") and not self.is_init and not (self.cfg.get("tests") or {}).get("targets"): continue
+
+            # NEW: Check meta dict first, fallback to file system permissions
+            executable = bool((meta or {}).get("executable", False))
+            if not executable and hasattr(origin, "exists") and origin.exists():
+                import os
+                executable = os.access(origin, os.X_OK)
+
             items.append({"rel": rel, "inline_template": inline_template, "dest": dest, "context": (meta or {}).get("context", "."), "updatable": bool((meta or {}).get("updatable", True)), "header_managed": (meta or {}).get("header_managed"), "origin": origin, "executable": executable})
         return items
 
@@ -1413,18 +1316,22 @@ class ConfigReader:
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
             if is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
 
-            # --- THE FIX: Drop foreign stacks ---
             if not self._is_valid_stack_rel(rel): continue
 
             dest = self._strip_package_prefix(rel)
             if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
+
+            # NEW: Check file system permissions
             executable = False
-            if origin == "fs" and self.tmpl_src.fs_dir and (src_path := self.tmpl_src.fs_dir / rel).exists(): executable = os.access(src_path, os.X_OK)
+            if hasattr(origin, "exists") and origin.exists():
+                import os
+                executable = os.access(origin, os.X_OK)
+
             items.append({"rel": rel, "dest": dest, "bytes": data, "origin": origin, "executable": executable})
         return items
 
     def _jinja_env_for_inline(self) -> Environment:
-        loaders = [FileSystemLoader(str(self.tmpl_src.fs_dir))] if self.tmpl_src and self.tmpl_src.fs_dir else []
+        loaders = [FileSystemLoader(str(self.tmpl_src._pkg_root))] if self.tmpl_src and self.tmpl_src._pkg_root else []
         env = Environment(loader=ChoiceLoader(loaders) if loaders else None, undefined=StrictUndefined, autoescape=False, keep_trailing_newline=True, trim_blocks=True, lstrip_blocks=True)
         env.filters.setdefault("ternary", lambda v, a, b: a if bool(v) else b)
         return env

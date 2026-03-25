@@ -79,28 +79,6 @@ def _interactive_select(prompt: str, options: list[str], default_idx: int = 0, m
     sys.stdout.flush()
     return selected
 
-def _sync_registry(url: str, ref: str) -> Path:
-    slug = re.sub(r"[^0-9A-Za-z]+", "-", url).strip("-").lower()
-    cache_dir = Path.home() / ".cache" / "scaffold-repo" / "registries" / slug
-
-    if not cache_dir.exists():
-        print(f"📥 Cloning remote registry from {url}...")
-        cache_dir.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "clone", url, str(cache_dir)], check=True)
-    else:
-        print(f"🔄 Syncing remote registry...")
-        subprocess.run(["git", "fetch", "--all"], cwd=cache_dir, check=True)
-
-    if ref:
-        subprocess.run(["git", "checkout", ref], cwd=cache_dir, check=True)
-        subprocess.run(["git", "pull", "--rebase"], cwd=cache_dir, check=False)
-    else:
-        subprocess.run(["git", "checkout", "main"], cwd=cache_dir, stderr=subprocess.DEVNULL) or \
-        subprocess.run(["git", "checkout", "master"], cwd=cache_dir, stderr=subprocess.DEVNULL)
-        subprocess.run(["git", "pull", "--rebase"], cwd=cache_dir, check=False)
-
-    return cache_dir
-
 def init_scaffoldrc() -> int:
     import yaml
     print("\n\033[1m=== Initializing scaffold-repo workspace ===\033[0m\n")
@@ -108,6 +86,7 @@ def init_scaffoldrc() -> int:
     target = Path.cwd().resolve()
     existing_cfg = find_scaffoldrc(target)
 
+    # 1. Determine Workspace
     if existing_cfg.get("workspace_dir"): def_ws = existing_cfg["workspace_dir"]
     elif (target / "scaffold.yaml").is_file(): def_ws = str(target.parent)
     else: def_ws = str(target)
@@ -115,56 +94,57 @@ def init_scaffoldrc() -> int:
     ws_input = input(f"Workspace Directory [\033[92m{def_ws}\033[0m]: ").strip()
     workspace_dir = Path(ws_input).expanduser().resolve() if ws_input else Path(def_ws).expanduser().resolve()
 
-    print("")
-    src_opts = ["Built-in (Default Templates)", "Remote Git Repository (Company Registry)"]
+    # 2. Determine Remote Base Templates
+    print("\nWhere should this workspace pull its scaffolding standards from by default?")
+    src_opts = [
+        "Andy's Official Starter Templates (github.com/contactandyc/scaffold-templates)",
+        "A Custom Corporate Registry (Provide a Git URL)",
+        "None (Skip registry auto-population)"
+    ]
     src_idx = _interactive_select("Template Registry Source:", src_opts)
 
-    reg_url = existing_cfg.get("template_registry_url", "")
-    reg_ref = existing_cfg.get("template_registry_ref", "")
-    tmpl_dir = Path(__file__).resolve().parents[2] / "templates"
+    reg_url = existing_cfg.get("template_registry_url", "https://github.com/contactandyc/scaffold-templates.git")
+    reg_ref = existing_cfg.get("template_registry_ref", "main")
+    base_tmpl_dir = None
 
-    if src_idx == 1:
-        reg_url = input(f"  > Git URL [\033[92m{reg_url}\033[0m]: ").strip() or reg_url
-        reg_ref = input(f"  > Branch/Tag/Ref [\033[92m{reg_ref or 'main'}\033[0m]: ").strip() or reg_ref
-        try:
-            cache_dir = _sync_registry(reg_url, reg_ref)
-            tmpl_dir = cache_dir / "templates" if (cache_dir / "templates").is_dir() else cache_dir
-        except subprocess.CalledProcessError:
+    if src_idx in (0, 1):
+        if src_idx == 1:
+            reg_url = input(f"  > Git URL [\033[92m{reg_url}\033[0m]: ").strip() or reg_url
+            reg_ref = input(f"  > Branch/Tag/Ref [\033[92m{reg_ref}\033[0m]: ").strip() or reg_ref
+        elif src_idx == 0:
+            reg_url = "https://github.com/contactandyc/scaffold-templates.git"
+            reg_ref = "main"
+
+        from .config_reader import _sync_git_template_repo
+        cached_dir = _sync_git_template_repo(reg_url, reg_ref, workspace_dir)
+        if not cached_dir:
             print("\n❌ Failed to fetch remote registry. Aborting.")
             return 1
 
-    print("")
-    ans_overlay = input("Do you want to configure a local templates overlay? (For custom profiles/licenses) [y/N]: ").strip().lower()
-    if ans_overlay in ("y", "yes"):
-        overlay_dir = input("  > Overlay Directory Path (relative to workspace) [\033[92m./templates\033[0m]: ").strip() or "./templates"
-        existing_cfg["template_overlay_dir"] = overlay_dir
+        base_tmpl_dir = (cached_dir / "templates").as_posix() if (cached_dir / "templates").is_dir() else cached_dir.as_posix()
+        print(f"✅ Active base templates mounted from: \033[96m{reg_url}@{reg_ref}\033[0m")
+    else:
+        reg_url = ""
+        reg_ref = ""
 
-    print(f"✅ Auto-detected base templates at: \033[96m{tmpl_dir}\033[0m")
-
-    # --- Use ConfigReader to unify the overlay and base! ---
+    # 3. Mount the ConfigReader
     from .config_reader import ConfigReader
-    overlay_path = existing_cfg.get("template_overlay_dir")
-    overlay_tmpl_dir = (workspace_dir / overlay_path).resolve() if overlay_path else None
     reader = ConfigReader(
         workspace_dir,
         project_name=None,
-        templates_dir=(overlay_tmpl_dir.as_posix() if overlay_tmpl_dir else None),
-        base_templates_dir=tmpl_dir.as_posix()
+        base_templates_dir=base_tmpl_dir
     )
 
     prompts_queue = []
-    root_defaults_text = reader.tmpl_src.read_resource_text(".scaffold-defaults.yaml")
-    if root_defaults_text:
-        try:
-            loaded = (yaml.safe_load(root_defaults_text) or {}).get("init_prompts", [])
-            for lp in loaded: lp["__path"] = []
-            prompts_queue.extend(loaded)
-        except Exception as e:
-            print(f"Warning: Failed to load root defaults: {e}")
+    data = reader.tmpl_src.get_stacked_defaults("_")
+    loaded = data.get("init_prompts", [])
+    for lp in loaded: lp["__path"] = []
+    prompts_queue.extend(loaded)
 
     answers = {}
     collected_answers = []
     seen_prompt_vars = set()
+    default_profile = None
 
     try:
         if prompts_queue:
@@ -175,13 +155,11 @@ def init_scaffoldrc() -> int:
         while prompts_queue:
             p = prompts_queue.pop(0)
 
-            # THE BUG FIX: Force it back to a list if it somehow mutated
             p_list = p.get("__path", [])
             if not isinstance(p_list, list): p_list = list(p_list)
 
             raw_var = p.get("var")
 
-            # Unique key safely uses tuple format so it's hashable
             prompt_key = (tuple(p_list), raw_var)
             if prompt_key in seen_prompt_vars:
                 continue
@@ -204,7 +182,6 @@ def init_scaffoldrc() -> int:
                 dir_tmpl = p["choices_from_dir"]
                 dir_str = jenv.from_string(dir_tmpl).render(**ctx).strip()
 
-                # --- Search Virtual File System! ---
                 options_from_dir = set()
                 for rel, _, _, _ in reader.tmpl_src.iter_files():
                     if rel.startswith(f"{dir_str}/"):
@@ -246,12 +223,10 @@ def init_scaffoldrc() -> int:
                 ans_list = ans if isinstance(ans, list) else [ans]
                 new_prompts = []
                 for a in ans_list:
-                    # --- Search Virtual File System! ---
                     sub_defaults_text = reader.tmpl_src.read_resource_text(f"{dir_str}/{a}/.scaffold-defaults.yaml")
                     if sub_defaults_text:
                         try:
                             loaded_prompts = (yaml.safe_load(sub_defaults_text) or {}).get("init_prompts", [])
-                            # Safely create the next array level
                             next_path = list(p_list) + [a]
                             for lp in loaded_prompts:
                                 lp["__path"] = next_path
@@ -261,6 +236,26 @@ def init_scaffoldrc() -> int:
 
                 prompts_queue = new_prompts + prompts_queue
 
+        # --- THE PROFILES FIX ---
+        profiles = set()
+        for f in reader.tmpl_src.find_registry_yamls("profiles"):
+            if f.endswith(".yaml"):
+                profiles.add(f[len("profiles/"): -5])
+            elif f.endswith(".yml"):
+                profiles.add(f[len("profiles/"): -4])
+        profiles = sorted(list(profiles))
+
+        default_profile = existing_cfg.get("default_profile")
+        if profiles:
+            print("\n\033[1m--- Workspace Defaults ---\033[0m")
+            if len(profiles) == 1:
+                default_profile = profiles[0]
+                print(f"Default project profile: \033[96m{default_profile}\033[0m (Auto-selected)")
+            else:
+                start_idx = profiles.index(default_profile) if default_profile in profiles else 0
+                prof_idx = _interactive_select("Select default project profile for this workspace:", profiles, default_idx=start_idx)
+                default_profile = profiles[prof_idx]
+
     except KeyboardInterrupt:
         print("\nAborted.")
         return 1
@@ -268,14 +263,13 @@ def init_scaffoldrc() -> int:
     yaml_config = {
         "workspace_dir": str(workspace_dir),
     }
+
     if reg_url:
         yaml_config["template_registry_url"] = reg_url
         yaml_config["template_registry_ref"] = reg_ref
-    else:
-        yaml_config["scaffold_dir"] = str(Path(__file__).resolve().parents[2])
 
-    if "template_overlay_dir" in existing_cfg:
-        yaml_config["template_overlay_dir"] = existing_cfg["template_overlay_dir"]
+    if default_profile:
+        yaml_config["default_profile"] = default_profile
 
     for p_list, raw_var, ans in collected_answers:
         if not p_list:
@@ -331,25 +325,15 @@ def init_scaffoldrc() -> int:
         print(f"\n❌ Failed to write config: {e}", file=sys.stderr)
         return 1
 
-# Change signature to accept reader instead of tmpl_dir
 def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, reader, existing_cfg: dict) -> dict:
     import yaml
-    import re
     from jinja2 import Environment
     jenv = Environment()
 
     print(f"\n⚙️  Configuring Workspace for \033[96m{stack}/{stack_type}\033[0m...")
 
-    # Use the reader to fetch from the virtual filesystem
-    defaults_text = reader.tmpl_src.read_resource_text(f"stacks/{stack}/{stack_type}/.scaffold-defaults.yaml")
-    if not defaults_text:
-        return existing_cfg
-
-    try:
-        data = yaml.safe_load(defaults_text) or {}
-        init_prompts = data.get("init_prompts", [])
-    except Exception:
-        return existing_cfg
+    data = reader.tmpl_src.get_stacked_defaults(f"stacks/{stack}/{stack_type}/_")
+    init_prompts = data.get("init_prompts", [])
 
     if not init_prompts:
         return existing_cfg
@@ -370,7 +354,6 @@ def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, 
             dir_tmpl = p["choices_from_dir"]
             dir_str = jenv.from_string(dir_tmpl).render(**answers).strip()
 
-            # --- OVERLAY FIX: Search the virtual unified filesystem! ---
             options_from_dir = set()
             for rel, _, _, _ in reader.tmpl_src.iter_files():
                 if rel.startswith(f"{dir_str}/"):

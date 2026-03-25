@@ -2,57 +2,15 @@
 from __future__ import annotations
 
 import re
-import shlex
 import subprocess
 from pathlib import Path
 import yaml
 
-from .config_reader import ConfigReader, _slug, _snake, _deep_merge, _coerce_list, _dedupe
-
-def _run(cmd: list[str] | str, *, cwd: Path | None = None, shell: bool = False) -> None:
-    if shell:
-        print(f"$ (in {cwd or Path.cwd()}) {cmd}")
-        subprocess.run(cmd, cwd=cwd, shell=True, check=True, executable="/bin/bash")
-    else:
-        print("$", " ".join(shlex.quote(c) for c in (cmd if isinstance(cmd, list) else [cmd])))
-        subprocess.run(cmd if isinstance(cmd, list) else [cmd], cwd=cwd, check=True)
-
-def _ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | None) -> None:
-    if not dest.exists():
-        cmd = ["git", "clone"]
-        if shallow: cmd += ["--depth", "1"]
-        if branch: cmd += ["--branch", branch, "--single-branch"]
-        cmd += [url, str(dest)]
-        try: _run(cmd)
-        except subprocess.CalledProcessError as e:
-            if "Repository not found" in str(e) or "not found" in str(e):
-                print(f"⚠️  skip {dest.name}: repo {url} not found")
-                return
-            raise
-        return
-
-    try: _run(["git", "-C", str(dest), "fetch", "--all", "--tags", "--prune"])
-    except subprocess.CalledProcessError as e:
-        print(f"⚠️  skip {dest.name}: fetch failed ({e})")
-        return
-
-    if branch:
-        fetch_cmd = ["git", "-C", str(dest), "fetch", "origin", branch]
-        if shallow: fetch_cmd += ["--depth", "1"]
-        try: _run(fetch_cmd)
-        except subprocess.CalledProcessError:
-            print(f"⚠️  skip {dest.name}: branch/tag {branch} not found")
-            return
-        try: _run(["git", "-C", str(dest), "checkout", "-B", branch, f"origin/{branch}"])
-        except subprocess.CalledProcessError:
-            try: _run(["git", "-C", str(dest), "checkout", "-B", branch, "FETCH_HEAD"])
-            except subprocess.CalledProcessError as e:
-                print(f"⚠️  skip {dest.name}: cannot checkout {branch} ({e})")
-                return
-    else:
-        try: _run(["git", "-C", str(dest), "pull", "--ff-only"])
-        except subprocess.CalledProcessError as e:
-            print(f"⚠️  skip {dest.name}: pull failed ({e})")
+from .utils.text import _slug
+from .utils.collections import _coerce_list, _dedupe
+from .config_reader import ConfigReader
+from .utils.shell import _run, _run_steps_chain
+from .utils.git import ensure_clone
 
 def _sanitize_steps(steps: list[str]) -> list[str]:
     out: list[str] = []
@@ -62,42 +20,6 @@ def _sanitize_steps(steps: list[str]) -> list[str]:
         if "git clone" in s or "rm -rf" in s: continue
         out.append(s)
     return out
-
-def _run_steps_chain(steps: list[str], *, cwd: Path, stack: str = "generic", stack_type: str = "") -> None:
-    if not steps: return
-
-    # --- Print a clean, human-readable version to the terminal ---
-    clean_print = " && \\\n  ".join(steps)
-    print(f"$ {clean_print}")
-
-    # Determine the scoped environment file based on the dependency's stack
-    env_name = f"{stack}_{stack_type}".strip("_").lower()
-    env_file = f".scaffoldrc_{env_name}" if env_name else ".scaffoldrc"
-
-    prologue = f"""
-        set -Eeuo pipefail
-        nproc() {{ (command -v nproc >/dev/null && command nproc) || (sysctl -n hw.ncpu 2>/dev/null) || (getconf _NPROCESSORS_ONLN 2>/dev/null) || echo 4; }}
-        
-        _cur="$PWD"
-        while [ "$_cur" != "/" ]; do
-          if [ -f "$_cur/.scaffoldrc.yaml" ]; then
-            [ -f "$_cur/{env_file}" ] && source "$_cur/{env_file}"
-            break
-          fi
-          _cur="$(dirname "$_cur")"
-        done
-        [ -z "${{WORKSPACE_DIR:-}}" ] && [ -f "$HOME/{env_file}" ] && source "$HOME/{env_file}" || true
-        
-        SUDO=""
-        if [[ "${{PREFIX:-/usr/local}}" == "/usr"* || "${{PREFIX:-/usr/local}}" == "/opt"* || "${{PREFIX:-/usr/local}}" == "/Library"* ]] && [[ "${{EUID:-$(id -u)}}" -ne 0 ]]; then
-            SUDO="sudo "
-        fi
-    """
-
-    chain = " && \\\n  ".join(steps)
-    script = prologue + "\n" + chain + "\n"
-
-    subprocess.run(["bash", "-lc", script], cwd=cwd, check=True)
 
 def _normalize_dependency(raw_item) -> dict:
     norm = {"stack": "generic", "stack_type": "", "url": None, "revision": None, "is_alias": False, "build_args": [], "env": {}, "shallow": False}
@@ -201,7 +123,7 @@ def resolve_dependency_graph(
 
         if not dep_path.exists():
             print(f"📦 Fetching dependency: {dep_name} -> {dep_url}")
-            _ensure_clone(dep_url, dep_path, branch=dep_rev, shallow=dep_shallow)
+            ensure_clone(dep_url, dep_path, branch=dep_rev, shallow=dep_shallow)
 
         resolve_dependency_graph(dep_path, global_registry, workspace_dir, graph, visited)
 
@@ -302,7 +224,6 @@ def build_all_libs(
         workspace_dir: Path,
         *,
         project_tokens: list[str],
-        templates_dir: str | None,
         base_templates_dir: str | None = None,
         do_clone: bool = True,
         do_build: bool = True,
@@ -310,8 +231,7 @@ def build_all_libs(
         do_clean: bool = False
 ) -> None:
     repo = repo.resolve()
-    reader = ConfigReader(repo, project_name=None, templates_dir=templates_dir,
-                          base_templates_dir=base_templates_dir)
+    reader = ConfigReader(repo, project_name=None, base_templates_dir=base_templates_dir)
     reader.load()
 
     reader.effective_config["workspace_dir"] = str(workspace_dir)

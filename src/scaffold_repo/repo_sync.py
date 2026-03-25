@@ -1,3 +1,4 @@
+# src/scaffold_repo/repo_sync.py
 from __future__ import annotations
 
 import json
@@ -27,8 +28,7 @@ def verify_repo(
         no_prompt: bool = False,
         include_exts: set[str] | None = None,
         project_name: str | None = None,
-        templates_dir: str | None = None,
-        base_templates_dir: str | None = None,  # <-- ADD THIS
+        base_templates_dir: str | None = None,
         assume_yes: bool = False,
         show_diffs: bool = False,
         is_init: bool = False
@@ -36,15 +36,13 @@ def verify_repo(
     rc_apply = apply_repo(
         repo,
         project_name=project_name,
-        templates_dir=templates_dir,
-        base_templates_dir=base_templates_dir,  # <-- ADD THIS
+        base_templates_dir=base_templates_dir,
         assume_yes=assume_yes,
         show_diffs=show_diffs,
         is_init=is_init
     )
 
-    reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir,
-                          base_templates_dir=base_templates_dir, is_init=is_init)
+    reader = ConfigReader(repo, project_name=project_name, base_templates_dir=base_templates_dir, is_init=is_init)
     reader.load()
     res = validate_licenses(
         repo,
@@ -62,15 +60,14 @@ def apply_repo(
         repo: Path,
         *,
         project_name: str | None = None,
-        templates_dir: str | None = None,
         base_templates_dir: str | None = None,
         assume_yes: bool = False,
         show_diffs: bool = False,
         is_init: bool = False
 ) -> int:
     repo = Path(repo).resolve()
-    reader = ConfigReader(repo, project_name=project_name, templates_dir=templates_dir,
-                          base_templates_dir=base_templates_dir, is_init=is_init)
+
+    reader = ConfigReader(repo, project_name=project_name, base_templates_dir=base_templates_dir, is_init=is_init)
     try:
         reader.load()
     except Exception as e:
