@@ -12,7 +12,7 @@ Since `scaffold-repo` is a global fleet manager, it is highly recommended to ins
 
 ```bash
 # 1. Clone the orchestrator
-git clone [https://github.com/your-org/scaffold-repo.git](https://github.com/your-org/scaffold-repo.git)
+git clone https://github.com/contactandyc/scaffold-repo.git
 cd scaffold-repo
 
 # 2. Install globally
@@ -81,16 +81,17 @@ project_title: A Map Reduce Library
 version: 0.0.3
 stack: c/cmake
 date_created: 2025-08-01
-profile: my-org/backend-team
+# pulls profile from templates/profiles/default.yaml
+profile: default
 
 # 1. Bind to the centralized Template Registry
 base_templates:
-  repo: [https://github.com/my-org/scaffold-templates.git](https://github.com/my-org/scaffold-templates.git)
+  repo: https://github.com/contactandyc/scaffold-templates.git
   ref: main
 
 # 2. Decentralized, Git-native dependency linking
 depends_on:
-  - [https://github.com/my-org/the-io-library.git](https://github.com/my-org/the-io-library.git)
+  - https://github.com/contactandyc/the-io-library.git
   - system/OpenSSL
 
 # 3. Define inline, custom licenses for specific third-party files
@@ -107,14 +108,14 @@ apps:
   context:
     dest: examples
     depends_on:
-      - [https://github.com/my-org/a-map-reduce-library.git](https://github.com/my-org/a-map-reduce-library.git)
+      - https://github.com/contactandyc/a-map-reduce-library.git
   01_word_count:
     binaries:
       word_count:
         - src/main.c
 ```
 
-Because the repository retains its own source of truth, it remains a standard, portable Git repository. The orchestrator merely reads this manifest to compute linking requirements, inject custom inline licenses to specific files, and execute the build graph.
+Because the repository retains its own source of truth, it remains a standard, portable Git repository. The orchestrator merely reads this manifest to compute linking requirements, auto-discover source/test files, inject custom inline licenses to specific files, and execute the build graph.
 
 -----
 
@@ -192,7 +193,7 @@ scaffold-repo --publish-release --push
 
 ## 🏗 Under the Hood: The Template Registry
 
-All of `scaffold-repo`'s power comes from the **Template Registry**. The engine itself contains zero hardcoded opinions. By default, the engine connects to a central Base Registry, but developers can initialize a **Local Overlay** to inject custom templates or linters without forking the base repository.
+All of `scaffold-repo`'s power comes from the **Template Registry**. The engine itself contains zero hardcoded opinions. By default, the engine connects to a central Base Registry that you dictate in your workspace configuration.
 
 ```text
 templates/
@@ -201,14 +202,13 @@ templates/
 ├── stacks/                    # The technical implementations (e.g., c/cmake, python/standard)
 ├── profiles/                  # Organizational standards (author info, default licenses, tools)
 ├── mixins/                    # Modular, optional Jinja templates (changie, jekyll-site)
-├── library-templates/         # Archetype YAML configs for dependencies (e.g., cmake-c-git)
 ├── libraries/                 # The global dependency index (how to build/link external tools)
 ├── licenses/                  # SPDX logic and NOTICE file generators
 ├── app-resources/             # Special templates looped per sub-application inside a repo
 └── resources/                 # Global assets like aliases.yaml or canonical license texts
 ```
 
-If you are a Platform Engineer looking to write custom templates, configure organizational profiles, or define internal dependencies, please read the **[Template Authoring Guide](https://www.google.com/search?q=/README-templates.md)**.
+If you are a Platform Engineer looking to write custom templates, configure organizational profiles, or define internal dependencies, please read the **[Template Authoring Guide](https://github.com/contactandyc/scaffold-templates.git)**.
 
 -----
 

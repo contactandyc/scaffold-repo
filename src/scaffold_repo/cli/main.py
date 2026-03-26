@@ -8,6 +8,7 @@ import sys
 import yaml
 from pathlib import Path
 from typing import Any
+from datetime import date
 
 from ..repo_sync import verify_repo
 from ..build_libs import build_all_libs
@@ -340,13 +341,20 @@ def create_project(project_slug: str, workspace_dir: Path, reader: ConfigReader,
     scaffold_file = project_dir / "scaffold.yaml"
     subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
 
+    current_date = date.today().isoformat()
+
     yaml_lines = [
         f"project_title: {project_slug}",
         f'version: "0.1.0"',
         f'description: "A dynamically scaffolded {selected_stack}/{selected_type} project"',
         f'stack: {selected_stack}/{selected_type}',
-        ""
+        f'date_created: {current_date}'
     ]
+
+    if selected_profile:
+        yaml_lines.append(f'# profile: {selected_profile}')
+
+    yaml_lines.append("")
 
     registry_url = existing_cfg.get("template_registry_url")
     if registry_url:
@@ -358,16 +366,6 @@ def create_project(project_slug: str, workspace_dir: Path, reader: ConfigReader,
             f"  ref: {existing_cfg.get('template_registry_ref', 'main')}",
             ""
         ])
-
-    yaml_lines.extend([
-        "# ── 2. Project Architecture & Standards ──",
-        "# Data to pull from the base_templates and merge into this project.",
-        "includes:",
-        f"  - source: library-templates/{selected_stack}-{selected_type}"
-    ])
-
-    if selected_profile:
-        yaml_lines.append(f"  - source: profiles/{selected_profile}")
 
     yaml_lines.append("")
 
@@ -384,14 +382,55 @@ def create_project(project_slug: str, workspace_dir: Path, reader: ConfigReader,
         "# license_overrides:",
         "#   \"src/vendor/**\": mit",
         "",
-        "# ── 4. Monorepo & Source Dependencies ──",
-        "# NOTE: 'depends_on' is ONLY for internal/source-built dependencies.",
-        "# Standard dependencies (PyPI, npm, apt) go in their respective config files.",
+        "# ── 4. Dependencies ──",
+        "# NOTE: 'depends_on' is for internal dependencies and external Git/System libraries.",
+        "# Standard packages (PyPI, npm, apt) go in their respective package manager files.",
         "depends_on: []",
         "#  - https://github.com/contactandyc/a-memory-library.git",
-        "#  - common/libuv  # (Example alias from resources/aliases.yaml)",
+        "#  - system/CURL",
         "",
-        "# ── 5. Feature Flags & Overrides ──",
+        "# ── 5. Sources (Auto-Discovered) ──",
+        "# By default, the engine globs all source files in `src/` to build your library.",
+        "#",
+        "# IMPORTANT: You must run `scaffold-repo --update` whenever you add,",
+        "# rename, or remove source files to regenerate the build scripts!",
+        "#",
+        "# Define explicitly ONLY if you need to exclude files or use a custom structure.",
+        "# library_sources:",
+        "#   - src/main.c",
+        "#   - src/utils.c",
+        "",
+        "# ── 6. Tests (Auto-Discovered) ──",
+        "# By default, the engine globs `tests/src/test_*.c` and creates an individual",
+        "# standalone test executable for each file found.",
+        "#",
+        "# Define explicitly if you need to group multiple files into a single test binary:",
+        "# tests:",
+        "#   targets:",
+        "#     - name: test_custom",
+        "#       sources: ",
+        "#         - tests/src/test_custom.c",
+        "#         - tests/src/mock_data.c",
+        "",
+        "# ── 7. Apps & Examples (Optional) ──",
+        "# Define standalone binaries, CLI tools, or examples here.",
+        "# Notice how you can use wildcards (*) and shared contexts.",
+        "# apps:",
+        "#   context:",
+        "#     dest: examples",
+        "#     depends_on:",
+        "#       - system/ZLIB",
+        "#   01_basic_example:",
+        "#     binaries:",
+        "#       basic_app:",
+        "#         - src/main.c",
+        "#         - src/utils.c",
+        "#   02_advanced_example:",
+        "#     binaries:",
+        "#       advanced_app:",
+        "#         - src/*.c",
+        "",
+        "# ── 8. Feature Flags & Overrides ──",
         "# Toggle optional scaffolding mixins on or off.",
         "# packages:",
         "#   changie: true     # Generate Changelog automation",
