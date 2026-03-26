@@ -4,7 +4,7 @@ Managing one repository is easy. Managing twenty interconnected micro-repos—ke
 
 `scaffold-repo` is a **Declarative Fleet Manager** and build orchestrator for polyglot ecosystems. Instead of manually updating 20 different `CMakeLists.txt` or `pyproject.toml` files, you define your company's standards in a centralized Template Registry. With a single CLI command, `scaffold-repo` resolves dependency graphs, injects stack-specific build scripts, enforces license compliance, and orchestrates Git branching across your entire fleet.
 
------
+---
 
 ## 📦 Installation
 
@@ -12,7 +12,7 @@ Since `scaffold-repo` is a global fleet manager, it is highly recommended to ins
 
 ```bash
 # 1. Clone the orchestrator
-git clone https://github.com/your-org/scaffold-repo.git
+git clone [https://github.com/your-org/scaffold-repo.git](https://github.com/your-org/scaffold-repo.git)
 cd scaffold-repo
 
 # 2. Install globally
@@ -20,7 +20,7 @@ pipx install .
 
 # (Optional) If you are actively developing the templates or engine:
 pip install -e .
-```
+````
 
 Verify the installation by running: `scaffold-repo --help`
 
@@ -79,34 +79,42 @@ Furthermore, the `depends_on` array utilizes a **Decentralized Graph**. Notice t
 ```yaml
 project_title: A Map Reduce Library
 version: 0.0.3
-
-# 1. Inherit company defaults and the C++ CMake architecture
+stack: c/cmake
+date_created: 2025-08-01
 profile: my-org/backend-team
-template: cmake-c-git
 
-# 2. Override specific file licenses natively
-license_profile: my-org/apache-2
-license_overrides:
-  "src/impl/**": my-org/lz4-bsd-license
+# 1. Bind to the centralized Template Registry
+base_templates:
+  repo: [https://github.com/my-org/scaffold-templates.git](https://github.com/my-org/scaffold-templates.git)
+  ref: main
 
-# 3. Decentralized, Git-native dependency linking
+# 2. Decentralized, Git-native dependency linking
 depends_on:
-  - https://github.com/my-org/the-io-library.git
+  - [https://github.com/my-org/the-io-library.git](https://github.com/my-org/the-io-library.git)
   - system/OpenSSL
+
+# 3. Define inline, custom licenses for specific third-party files
+licenses:
+  lz4_custom:
+    spdx: |
+      SPDX-License-Identifier: BSD-2-Clause
+      Portions © 2011–present Yann Collet
+license_overrides:
+  "src/third_party/lz4/**": lz4_custom
 
 # 4. Route sub-applications and examples dynamically
 apps:
   context:
     dest: examples
     depends_on:
-      - https://github.com/my-org/a-map-reduce-library.git
+      - [https://github.com/my-org/a-map-reduce-library.git](https://github.com/my-org/a-map-reduce-library.git)
   01_word_count:
     binaries:
       word_count:
         - src/main.c
 ```
 
-Because the repository retains its own source of truth, it remains a standard, portable Git repository. The orchestrator merely reads this manifest to compute linking requirements and execute the build graph.
+Because the repository retains its own source of truth, it remains a standard, portable Git repository. The orchestrator merely reads this manifest to compute linking requirements, inject custom inline licenses to specific files, and execute the build graph.
 
 -----
 
@@ -200,7 +208,7 @@ templates/
 └── resources/                 # Global assets like aliases.yaml or canonical license texts
 ```
 
-If you are a Platform Engineer looking to write custom templates, configure organizational profiles, or define internal dependencies, please read the **[Template Authoring Guide](/README-templates.md)**.
+If you are a Platform Engineer looking to write custom templates, configure organizational profiles, or define internal dependencies, please read the **[Template Authoring Guide](https://www.google.com/search?q=/README-templates.md)**.
 
 -----
 

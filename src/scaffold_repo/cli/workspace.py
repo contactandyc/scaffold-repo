@@ -1,9 +1,8 @@
-# src/scaffold_repo/scaffoldrc.py
+# src/scaffold_repo/cli/workspace.py
 import sys
-import subprocess
 from pathlib import Path
-import re
 import yaml
+from .ui import interactive_select
 
 def find_scaffoldrc(current_dir: Path) -> dict:
     """Walks upward to find .scaffoldrc.yaml, falling back to ~/.scaffoldrc.yaml."""
@@ -21,63 +20,6 @@ def find_scaffoldrc(current_dir: Path) -> dict:
         try: return yaml.safe_load(global_rc.read_text(encoding="utf-8")) or {}
         except Exception: pass
     return {}
-
-def _interactive_select(prompt: str, options: list[str], default_idx: int = 0, multiselect: bool = False) -> list[int] | int:
-    if multiselect:
-        print(f"\n{prompt}")
-        for i, opt in enumerate(options):
-            print(f"  {i+1}) {opt}")
-        while True:
-            ans = input(f"Select one or more [1-{len(options)}] (comma-separated): ").strip()
-            if not ans: return [default_idx]
-            try:
-                indices = [int(x.strip()) - 1 for x in ans.split(",")]
-                if all(0 <= x < len(options) for x in indices):
-                    return indices
-            except ValueError: pass
-            print("Invalid selection. Use comma-separated numbers (e.g., 1,3).")
-
-    try:
-        import sys, tty, termios
-    except ImportError:
-        print(prompt)
-        for i, opt in enumerate(options):
-            print(f"  {i+1}) {opt}")
-        while True:
-            ans = input(f"Select [1-{len(options)}] (default {default_idx+1}): ").strip()
-            if not ans: return default_idx
-            if ans.isdigit() and 1 <= int(ans) <= len(options): return int(ans) - 1
-            print("Invalid selection.")
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    selected = default_idx
-    sys.stdout.write("\033[?25l")
-    try:
-        tty.setraw(fd)
-        while True:
-            sys.stdout.write(f"\r{prompt}\n")
-            for i, opt in enumerate(options):
-                prefix = "  ❯ " if i == selected else "    "
-                color = "\033[96m" if i == selected else ""
-                reset = "\033[0m"
-                sys.stdout.write(f"\r{prefix}{color}{opt}{reset}\033[K\n")
-            sys.stdout.flush()
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':
-                ch2 = sys.stdin.read(2)
-                if ch2 == '[A': selected = max(0, selected - 1)
-                elif ch2 == '[B': selected = min(len(options) - 1, selected + 1)
-            elif ch in ('\r', '\n'): break
-            elif ch == '\x03': raise KeyboardInterrupt
-            sys.stdout.write(f"\033[{len(options) + 1}A")
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        sys.stdout.write("\033[?25h")
-        sys.stdout.flush()
-    sys.stdout.write(f"\033[{len(options) + 1}A\r\033[K\033[J")
-    sys.stdout.flush()
-    return selected
 
 def init_scaffoldrc() -> int:
     import yaml
@@ -101,7 +43,7 @@ def init_scaffoldrc() -> int:
         "A Custom Corporate Registry (Provide a Git URL)",
         "None (Skip registry auto-population)"
     ]
-    src_idx = _interactive_select("Template Registry Source:", src_opts)
+    src_idx = interactive_select("Template Registry Source:", src_opts)
 
     reg_url = existing_cfg.get("template_registry_url", "https://github.com/contactandyc/scaffold-templates.git")
     reg_ref = existing_cfg.get("template_registry_ref", "main")
@@ -115,8 +57,8 @@ def init_scaffoldrc() -> int:
             reg_url = "https://github.com/contactandyc/scaffold-templates.git"
             reg_ref = "main"
 
-        from .config_reader import _sync_git_template_repo
-        cached_dir = _sync_git_template_repo(reg_url, reg_ref, workspace_dir)
+        from ..utils.git import sync_git_template_repo
+        cached_dir = sync_git_template_repo(reg_url, reg_ref, workspace_dir)
         if not cached_dir:
             print("\n❌ Failed to fetch remote registry. Aborting.")
             return 1
@@ -128,7 +70,7 @@ def init_scaffoldrc() -> int:
         reg_ref = ""
 
     # 3. Mount the ConfigReader
-    from .config_reader import ConfigReader
+    from ..core.config import ConfigReader
     reader = ConfigReader(
         workspace_dir,
         project_name=None,
@@ -202,7 +144,7 @@ def init_scaffoldrc() -> int:
                     print(f"{prompt_str} \033[96m{options[0]}\033[0m (Auto-selected)")
                 else:
                     start_idx = options.index(def_val) if def_val in options and not is_multi else 0
-                    ans_idx = _interactive_select(prompt_str, options, default_idx=start_idx, multiselect=is_multi)
+                    ans_idx = interactive_select(prompt_str, options, default_idx=start_idx, multiselect=is_multi)
                     if is_multi:
                         ans = [options[i] for i in ans_idx]
                     else:
@@ -253,7 +195,7 @@ def init_scaffoldrc() -> int:
                 print(f"Default project profile: \033[96m{default_profile}\033[0m (Auto-selected)")
             else:
                 start_idx = profiles.index(default_profile) if default_profile in profiles else 0
-                prof_idx = _interactive_select("Select default project profile for this workspace:", profiles, default_idx=start_idx)
+                prof_idx = interactive_select("Select default project profile for this workspace:", profiles, default_idx=start_idx)
                 default_profile = profiles[prof_idx]
 
     except KeyboardInterrupt:
@@ -374,7 +316,7 @@ def append_stack_to_workspace(stack: str, stack_type: str, workspace_dir: Path, 
                 print(f"{prompt_str} \033[96m{options[0]}\033[0m (Auto-selected)")
             else:
                 start_idx = options.index(def_val) if def_val in options and not is_multi else 0
-                ans_idx = _interactive_select(prompt_str, options, default_idx=start_idx, multiselect=is_multi)
+                ans_idx = interactive_select(prompt_str, options, default_idx=start_idx, multiselect=is_multi)
                 if is_multi: ans = [options[i] for i in ans_idx]
                 else:
                     ans = options[ans_idx]

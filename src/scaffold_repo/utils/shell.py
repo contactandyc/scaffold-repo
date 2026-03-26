@@ -2,7 +2,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
-def _run(cmd: list[str] | str, *, cwd: Path | None = None, shell: bool = False) -> None:
+def run(cmd: list[str] | str, *, cwd: Path | None = None, shell: bool = False) -> None:
     if shell:
         print(f"$ (in {cwd or Path.cwd()}) {cmd}")
         subprocess.run(cmd, cwd=cwd, shell=True, check=True, executable="/bin/bash")
@@ -10,7 +10,7 @@ def _run(cmd: list[str] | str, *, cwd: Path | None = None, shell: bool = False) 
         print("$", " ".join(shlex.quote(c) for c in (cmd if isinstance(cmd, list) else [cmd])))
         subprocess.run(cmd if isinstance(cmd, list) else [cmd], cwd=cwd, check=True)
 
-def _run_steps_chain(steps: list[str], *, cwd: Path, stack: str = "generic", stack_type: str = "") -> None:
+def run_steps_chain(steps: list[str], *, cwd: Path, stack: str = "generic", stack_type: str = "") -> None:
     if not steps: return
 
     clean_print = " && \\\n  ".join(steps)

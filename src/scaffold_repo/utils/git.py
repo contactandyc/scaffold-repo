@@ -3,7 +3,7 @@ import sys
 import hashlib
 import re
 from pathlib import Path
-from .shell import _run
+from .shell import run
 
 def ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | None) -> None:
     if not dest.exists():
@@ -11,7 +11,7 @@ def ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | No
         if shallow: cmd += ["--depth", "1"]
         if branch: cmd += ["--branch", branch, "--single-branch"]
         cmd += [url, str(dest)]
-        try: _run(cmd)
+        try: run(cmd)
         except subprocess.CalledProcessError as e:
             if "Repository not found" in str(e) or "not found" in str(e):
                 print(f"⚠️  skip {dest.name}: repo {url} not found")
@@ -19,7 +19,7 @@ def ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | No
             raise
         return
 
-    try: _run(["git", "-C", str(dest), "fetch", "--all", "--tags", "--prune"])
+    try: run(["git", "-C", str(dest), "fetch", "--all", "--tags", "--prune"])
     except subprocess.CalledProcessError as e:
         print(f"⚠️  skip {dest.name}: fetch failed ({e})")
         return
@@ -27,18 +27,18 @@ def ensure_clone(url: str, dest: Path, *, branch: str | None, shallow: bool | No
     if branch:
         fetch_cmd = ["git", "-C", str(dest), "fetch", "origin", branch]
         if shallow: fetch_cmd += ["--depth", "1"]
-        try: _run(fetch_cmd)
+        try: run(fetch_cmd)
         except subprocess.CalledProcessError:
             print(f"⚠️  skip {dest.name}: branch/tag {branch} not found")
             return
-        try: _run(["git", "-C", str(dest), "checkout", "-B", branch, f"origin/{branch}"])
+        try: run(["git", "-C", str(dest), "checkout", "-B", branch, f"origin/{branch}"])
         except subprocess.CalledProcessError:
-            try: _run(["git", "-C", str(dest), "checkout", "-B", branch, "FETCH_HEAD"])
+            try: run(["git", "-C", str(dest), "checkout", "-B", branch, "FETCH_HEAD"])
             except subprocess.CalledProcessError as e:
                 print(f"⚠️  skip {dest.name}: cannot checkout {branch} ({e})")
                 return
     else:
-        try: _run(["git", "-C", str(dest), "pull", "--ff-only"])
+        try: run(["git", "-C", str(dest), "pull", "--ff-only"])
         except subprocess.CalledProcessError as e:
             print(f"⚠️  skip {dest.name}: pull failed ({e})")
 
@@ -63,8 +63,8 @@ def sync_git_template_repo(url: str, ref: str, workspace_dir: Path) -> Path | No
             pass
 
     safe_name = re.sub(r"[^0-9A-Za-z]+", "-", repo_name)
-    slug = f"{safe_name}-{hashlib.md5(f'{url}@{ref}'.encode('utf-8')).hexdigest()[:8]}"
-    cache_dir = Path.home() / ".cache" / "scaffold-repo" / "base_templates" / slug
+    repo_slug = f"{safe_name}-{hashlib.md5(f'{url}@{ref}'.encode('utf-8')).hexdigest()[:8]}"
+    cache_dir = Path.home() / ".cache" / "scaffold-repo" / "base_templates" / repo_slug
 
     try:
         if not cache_dir.exists():

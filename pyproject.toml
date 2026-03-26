@@ -16,8 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-scaffold-repo = "scaffold_repo.scaffold_repo:main"
-scaffold-build-libs = "scaffold_repo.build_libs:main"
+scaffold-repo = "scaffold_repo.cli.main:main"
 
 [project.optional-dependencies]
 dev = [
@@ -30,9 +29,3 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scaffold_repo"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"templates" = "scaffold_repo/templates"
-
-[tool.hatch.build.targets.sdist.force-include]
-"templates" = "templates"

@@ -6,10 +6,10 @@ import subprocess
 from pathlib import Path
 import yaml
 
-from .utils.text import _slug
-from .utils.collections import _coerce_list, _dedupe
-from .config_reader import ConfigReader
-from .utils.shell import _run, _run_steps_chain
+from .utils.text import slug
+from .utils.collections import coerce_list, dedupe
+from .core.config import ConfigReader
+from .utils.shell import run_steps_chain
 from .utils.git import ensure_clone
 
 def _sanitize_steps(steps: list[str]) -> list[str]:
@@ -60,7 +60,7 @@ def _normalize_dependency(raw_item) -> dict:
         norm["url"] = data.get("url") or data.get("source") or norm["url"]
         norm["revision"] = data.get("revision") or data.get("tag") or data.get("branch")
         norm["shallow"] = data.get("shallow", False)
-        norm["build_args"] = _coerce_list(data.get("build_args", []))
+        norm["build_args"] = coerce_list(data.get("build_args", []))
         norm["env"] = data.get("env", {})
         if norm["url"] and not norm["url"].startswith(("http://", "https://", "git@")):
             norm["is_alias"] = True
@@ -92,9 +92,9 @@ def resolve_dependency_graph(
         except Exception:
             pass
 
-    raw_deps = _coerce_list(local_data.get("depends_on", []))
+    raw_deps = coerce_list(local_data.get("depends_on", []))
     for app in local_data.get("apps", {}).values():
-        raw_deps.extend(_coerce_list(app.get("depends_on", [])))
+        raw_deps.extend(coerce_list(app.get("depends_on", [])))
 
     resolved_deps = []
 
@@ -102,7 +102,7 @@ def resolve_dependency_graph(
         dep = _normalize_dependency(raw)
 
         if dep["is_alias"]:
-            alias_slug = _slug(dep["url"])
+            alias_slug = slug(dep["url"])
             if alias_slug in global_registry:
                 dep_url = global_registry[alias_slug]["item"].get("url")
                 dep_name = global_registry[alias_slug]["name"]
@@ -128,7 +128,7 @@ def resolve_dependency_graph(
         resolve_dependency_graph(dep_path, global_registry, workspace_dir, graph, visited)
 
     graph[target_slug] = {
-        "deps": _dedupe(resolved_deps),
+        "deps": dedupe(resolved_deps),
         "path": target_repo_path,
         "build_args": []
     }
@@ -154,7 +154,7 @@ def _toposort_graph(graph: dict) -> list[str]:
                 queue.append(m)
     return ordered
 
-def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Path, do_build: bool = True, do_install: bool = True, do_clean: bool = False) -> None:
+def execute_build(project_slug: str, target_dir: Path, reg_item: dict, workspace_dir: Path, do_build: bool = True, do_install: bool = True, do_clean: bool = False) -> None:
     stack = reg_item.get("stack", "generic")
     stack_type = reg_item.get("stack_type", "")
 
@@ -169,7 +169,7 @@ def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Pa
             cmds.append("./build.sh build")
 
         if cmds:
-            _run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
+            run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
 
     elif (target_dir / "CMakeLists.txt").exists():
         print(f"  • using smart CMake fallback (clean={do_clean}, build={do_build}, install={do_install})")
@@ -179,7 +179,7 @@ def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Pa
 
         if do_build or do_install:
             extra_cmake_args = []
-            raw_steps = _coerce_list(reg_item.get("build_steps", []))
+            raw_steps = coerce_list(reg_item.get("build_steps", []))
             for step in raw_steps:
                 if "cmake " in step:
                     args = re.findall(r"-D[^\s]+", step)
@@ -199,11 +199,11 @@ def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Pa
                 cmds.append(f'${{SUDO}}cmake --install .')
 
         if cmds:
-            _run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
+            run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
 
     elif reg_item.get("build_steps"):
         print(f"  • using explicit build_steps from registry (clean={do_clean}, build={do_build})")
-        raw_steps = _coerce_list(reg_item["build_steps"])
+        raw_steps = coerce_list(reg_item["build_steps"])
         sanitized = _sanitize_steps(raw_steps)
 
         if not do_build and not do_install:
@@ -213,10 +213,10 @@ def execute_build(slug: str, target_dir: Path, reg_item: dict, workspace_dir: Pa
 
         if sanitized:
             steps = [s.replace("/usr/local", "${PREFIX:-/usr/local}").replace("sudo ", "${SUDO}") for s in sanitized]
-            _run_steps_chain(steps, cwd=target_dir, stack=stack, stack_type=stack_type)
+            run_steps_chain(steps, cwd=target_dir, stack=stack, stack_type=stack_type)
 
     else:
-        print(f"  ⚠️  skip {slug}: no build.sh, CMakeLists.txt, or build_steps found.")
+        print(f"  ⚠️  skip {project_slug}: no build.sh, CMakeLists.txt, or build_steps found.")
 
 
 def build_all_libs(
@@ -250,26 +250,26 @@ def build_all_libs(
         print("— No external dependencies required.")
         return
 
-    for slug in ordered_slugs:
-        dep_path = graph[slug]["path"]
-        print(f"\n=== Processing Dependency: {slug} ===")
+    for project_slug in ordered_slugs:
+        dep_path = graph[project_slug]["path"]
+        print(f"\n=== Processing Dependency: {project_slug} ===")
 
         if not do_build and not do_clean:
-            print(f"✅ fetched: {slug}")
+            print(f"✅ fetched: {project_slug}")
             continue
 
         reg_item = None
         if slug in global_registry:
-            reg_item = global_registry[slug]["item"]
+            reg_item = global_registry[project_slug]["item"]
         else:
             for k, v in global_registry.items():
-                if v.get("name") == slug or v.get("slug") == slug or k.endswith(f"-{slug}") or k == slug:
+                if v.get("name") == project_slug or v.get("slug") == project_slug or k.endswith(f"-{project_slug}") or k == project_slug:
                     reg_item = v.get("item")
                     break
 
         if not reg_item:
             reg_item = {}
 
-        execute_build(slug, dep_path, reg_item, workspace_dir, do_build=do_build, do_install=do_install, do_clean=do_clean)
+        execute_build(project_slug, dep_path, reg_item, workspace_dir, do_build=do_build, do_install=do_install, do_clean=do_clean)
 
-        print(f"✅ done: {slug}")
+        print(f"✅ done: {project_slug}")

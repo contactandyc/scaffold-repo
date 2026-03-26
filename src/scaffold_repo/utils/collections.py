@@ -1,11 +1,11 @@
 from typing import Any, Iterable
 
-def _coerce_list(x) -> list[Any]:
+def coerce_list(x) -> list[Any]:
     if x is None: return []
     if isinstance(x, (list, tuple)): return list(x)
     return [x]
 
-def _dedupe(seq: Iterable[Any]) -> list[Any]:
+def dedupe(seq: Iterable[Any]) -> list[Any]:
     out = []
     seen_hashable = set()
     for s in seq:
@@ -19,10 +19,13 @@ def _dedupe(seq: Iterable[Any]) -> list[Any]:
                 out.append(s)
     return out
 
-def _deep_merge(a, b):
-    if isinstance(a, list) and isinstance(b, list): return _dedupe(a + b)
-    if not isinstance(a, dict) or not isinstance(b, dict): return b if b is not None else a
+def deep_merge(a, b):
+    # If either 'a' or 'b' is not a dict (e.g., they are lists, strings, etc.),
+    # 'b' overwrites 'a' (unless 'b' is None, in which case 'a' is kept).
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return b if b is not None else a
+
     out = dict(a)
     for k, v in b.items():
-        out[k] = _deep_merge(out.get(k), v)
+        out[k] = deep_merge(out.get(k), v)
     return out
