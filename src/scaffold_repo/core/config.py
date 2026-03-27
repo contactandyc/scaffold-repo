@@ -214,6 +214,7 @@ class ConfigReader:
                 if prof_data:
                     # Merge the profile underneath the current config, so local overrides always win
                     self.cfg = deep_merge(prof_data, self.cfg)
+            # -----------------------------------------------------
 
             # Establish standardized string formats for the project name (slug, snake_case, camelCase)
             nm = self.project_name or local_data.get("project_name") or local_data.get("project_title") or self.repo.name
@@ -293,9 +294,9 @@ class ConfigReader:
 
     def _normalize_keys_autofill(self) -> None:
         """
-        Fills in missing configuration values with sensible defaults. This includes
-        auto-discovering source/test files on the filesystem, formatting copyrights,
-        resolving contact identities, and normalizing stack types.
+        Fills in missing configuration values. Auto-discovers source/test files
+        on the filesystem, or performs a 'virtual glob' of the Jinja templates
+        if the files haven't been generated yet.
         """
         # 1. Normalize the technology stack notation
         raw_stack = str(self.cfg.get("stack") or "").strip()
@@ -310,7 +311,50 @@ class ConfigReader:
         if not self.cfg.get("stack_type"):
             self.cfg["stack_type"] = "base"
 
-        # 2. Auto-discover library sources if none are explicitly listed
+        # --- THE VIRTUAL GLOBBER ---
+        def _virtual_glob(target_dir: str, valid_exts: set[str]) -> list[str]:
+            """Peers into the template headers to predict what files will be created."""
+            import re
+            import yaml
+            from jinja2 import Environment
+            found = []
+            st, st_type = self.cfg.get("stack"), self.cfg.get("stack_type")
+            valid_prefixes = (f"stacks/{st}/{st_type}/", f"stacks/{st}/base/") if st else ()
+
+            for rel, data, is_j2, _ in self.tmpl_src.iter_files():
+                if not is_j2 or not valid_prefixes or not rel.startswith(valid_prefixes):
+                    continue
+
+                text = data.decode("utf-8", errors="ignore")
+                m = re.match(r"^\s*\{#-?\s*(.*?)\s*-?#\}\s*", text, re.S)
+                dest = ""
+
+                # Extract dest from Jinja header
+                if m:
+                    try:
+                        meta = yaml.safe_load(m.group(1))
+                        if isinstance(meta, dict):
+                            meta = meta.get("scaffold-repo", meta.get("scaffold_repo", meta))
+                            if isinstance(meta, dict):
+                                dest = meta.get("dest", "")
+                    except Exception: pass
+
+                # Fallback: calculate dest from relative path if no header exists
+                if not dest:
+                    for pfx in valid_prefixes:
+                        if rel.startswith(pfx):
+                            dest = rel[len(pfx):-3] # strip prefix and .j2
+                            break
+
+                if dest.startswith(target_dir) and any(dest.endswith(e) for e in valid_exts):
+                    try:
+                        rendered = Environment().from_string(dest).render(**self.cfg)
+                        found.append(rendered)
+                    except Exception: pass
+            return found
+        # ---------------------------
+
+        # 2. Auto-discover library sources
         dp = dict(self.cfg.get("deps") or {})
         ts = dict(self.cfg.get("tests") or {})
         ps = self.cfg.get("project_snake") or "project"
@@ -319,10 +363,12 @@ class ConfigReader:
         if not lib_srcs:
             exts = {".c", ".cc", ".cpp", ".cxx"}
             src_root = self.repo / "src"
-            if self.is_init and not src_root.exists():
-                auto = [f"src/{ps}.c"]
+            if src_root.exists():
+                auto = [p.relative_to(self.repo).as_posix() for p in src_root.rglob("*") if p.is_file() and p.suffix.lower() in exts]
             else:
-                auto = [p.relative_to(self.repo).as_posix() for p in src_root.rglob("*") if p.is_file() and p.suffix.lower() in exts] if src_root.is_dir() else []
+                # 🔮 Predict the future using templates!
+                auto = _virtual_glob("src/", exts)
+
             if auto: lib_srcs = sorted(auto)
 
         norm_srcs = [str(s) for s in (lib_srcs if isinstance(lib_srcs, (list, tuple)) else [lib_srcs])] if lib_srcs else []
@@ -333,21 +379,21 @@ class ConfigReader:
         if not test_tgts:
             tests_src = self.repo / "tests" / "src"
             exts = {".c", ".cc", ".cpp", ".cxx"}
-            if self.is_init and not tests_src.exists():
-                auto = [{"name": f"test_{ps}", "sources": [f"src/test_{ps}.c"]}]
+            if tests_src.exists():
+                auto = [{"name": p.stem, "sources": [f"src/{p.name}"]} for p in tests_src.glob("test_*") if p.is_file() and p.suffix.lower() in exts]
             else:
-                auto = [{"name": p.stem, "sources": [f"src/{p.name}"]} for p in tests_src.glob("test_*") if p.is_file() and p.suffix.lower() in exts] if tests_src.is_dir() else []
+                # 🔮 Predict the future using templates!
+                auto = [{"name": Path(p).stem, "sources": [p.replace("tests/", "", 1)]} for p in _virtual_glob("tests/src/", exts)]
+
             test_tgts = sorted(auto, key=lambda t: t["name"]) if auto else []
 
         ts["targets"] = test_tgts or []
         self.cfg["deps"], self.cfg["tests"] = dp, ts
 
         # 4. Normalize dates and calculate year spans for copyrights
+        # ... (The rest of the method remains exactly the same from here down!) ...
         import datetime
         current_year = str(self.cfg.get("date") or "")[:4]
-        if not current_year or len(current_year) < 4:
-            current_year = str(datetime.datetime.now().year)
-
         self.cfg["year"] = current_year
         raw_created = str(self.cfg.get("date_created") or "")
         default_start_year = raw_created[:4] if len(raw_created) >= 4 else current_year

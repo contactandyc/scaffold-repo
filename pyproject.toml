@@ -17,6 +17,12 @@ dependencies = [
 
 [project.scripts]
 scaffold-repo = "scaffold_repo.cli.main:main"
+scaffold-git = "scaffold_repo.cli.git_main:main"
+scaffold-init = "scaffold_repo.cli.init_main:main"
+scaffold-create = "scaffold_repo.cli.create_main:main"
+scaffold-sync = "scaffold_repo.cli.sync_main:main"
+scaffold-build = "scaffold_repo.cli.build_main:main"
+
 
 [project.optional-dependencies]
 dev = [
