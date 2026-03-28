@@ -162,7 +162,7 @@ class TemplatePlanner:
             is_exec = it.get("executable", False)
             plan.append(PlanItem("jinja", rendered_dest, status, it.get("updatable", True), diff_text, new_text.encode("utf-8"), sha256(it["inline_template"].encode("utf-8")), it["context"], header_managed, is_exec))
 
-        plan.extend(self._plan_apps_resources(show_diffs=show_diffs))
+        plan.extend(self._plan_subproject_resources(show_diffs=show_diffs))
         return plan
 
     def plan_copy(self, *, show_diffs: bool = False) -> list[PlanItem]:
@@ -245,10 +245,18 @@ class TemplatePlanner:
         if rel.startswith(f"stacks/{stack}/base/"): return True
         return False
 
+    def _is_resource_file(self, rel: str) -> bool:
+        """Helper to ensure generic subproject templates aren't swept up by the main loop."""
+        resource_dirs = {rule.get("resource") for rule in self.cfg.get("subproject_rules", {}).values() if rule.get("resource")}
+        for rd in resource_dirs:
+            if f"/{rd}/" in rel or rel.startswith(f"{rd}/"): return True
+        return False
+
     def _discover_jinja_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if not is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+            if not is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+            if self._is_resource_file(rel): continue
             if not self._is_valid_stack_rel(rel): continue
 
             text = data.decode("utf-8", errors="replace")
@@ -272,7 +280,8 @@ class TemplatePlanner:
     def _discover_copy_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if is_j2 or self._matches_disabled(rel) or rel.startswith("app-resources/") or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+            if is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+            if self._is_resource_file(rel): continue
             if not self._is_valid_stack_rel(rel): continue
 
             dest = self._strip_package_prefix(rel)
@@ -286,79 +295,81 @@ class TemplatePlanner:
             items.append({"rel": rel, "dest": dest, "bytes": data, "origin": origin, "executable": executable})
         return items
 
-    def _compute_app_dest_dir(self, base_dest: str, ctx_dest: str | None, ctx_name: str) -> str:
-        base = (base_dest or "apps").strip("/")
-        return str(ctx_dest).strip().strip("/") if ctx_dest and str(ctx_dest).strip().startswith("/") else f"{base}/{(str(ctx_dest).strip('/') if ctx_dest else ctx_name)}"
-
-    def _plan_apps_resources(self, *, show_diffs: bool) -> list[PlanItem]:
-        apps = self.cfg.get("apps") or {}
-        contexts = [k for k in apps.keys() if k != "context"]
-        if not contexts: return []
-        all_app_resources = [(rel, data, is_j2, origin) for rel, data, is_j2, origin in self.tmpl_src.iter_files() if rel.startswith("app-resources/") and not rel.endswith("/")]
-        if not all_app_resources: return []
+    def _plan_subproject_resources(self, *, show_diffs: bool) -> list[PlanItem]:
+        rules = self.cfg.get("subproject_rules", {})
+        if not rules: return []
 
         env, plan, base = self._jinja_env_for_inline(), [], self._build_ctx_inherited("deps")
-        for ctx_name in contexts:
-            ctx = dict(apps.get(ctx_name) or {})
-            dest_dir = ctx.get("_apps_dest_dir") or self._compute_app_dest_dir(str((apps.get("context") or {}).get("dest") or "apps"), ctx.get("dest"), ctx_name)
-            rctx = deep_merge(base, ctx)
 
-            raw_stack = str(ctx.get("stack") or self.cfg.get("stack", "")).strip()
-            raw_type = str(ctx.get("stack_type") or self.cfg.get("stack_type", "")).strip()
+        for block_name, rule in rules.items():
+            block_data = self.cfg.get(block_name)
+            if not isinstance(block_data, dict): continue
 
-            if "/" in raw_stack:
-                app_stack, derived_type = raw_stack.split("/", 1)
-                app_stack = app_stack.lower()
-                app_stack_type = raw_type.lower() or derived_type.lower()
-            else:
-                app_stack = raw_stack.lower()
-                app_stack_type = raw_type.lower()
+            resource_dir = rule.get("resource")
+            if not resource_dir: continue
 
-            if not app_stack_type:
-                app_stack_type = raw_type.lower() or "base"
+            # Gather all templates mapped to this resource directory
+            all_resources = [(rel, data, is_j2, origin) for rel, data, is_j2, origin in self.tmpl_src.iter_files() if f"/{resource_dir}/" in rel or rel.startswith(f"{resource_dir}/")]
+            if not all_resources: continue
 
-            app_defaults = self.tmpl_src.get_stacked_defaults(f"stacks/{app_stack}/{app_stack_type}/_")
-            rctx = deep_merge(app_defaults, rctx)
+            for ctx_name, ctx in block_data.items():
+                if ctx_name in ("context", "depends_on"): continue
+                if not isinstance(ctx, dict): continue
 
-            active_prefix = f"app-resources/{app_stack}/{app_stack_type}/" if app_stack and app_stack_type else None
-            global_prefix = "app-resources/global/"
+                dest_dir = ctx.get("_dest_dir", f"{block_name}/{ctx_name}")
+                rctx = deep_merge(base, ctx)
 
-            rctx.setdefault("project_name", self.cfg.get("project_name") or "project")
-            rctx.setdefault("project_slug", slug(rctx["project_name"]))
-            rctx.setdefault("project_snake", snake(rctx["project_slug"]))
+                raw_stack = str(ctx.get("stack") or self.cfg.get("stack", "")).strip()
+                raw_type = str(ctx.get("stack_type") or self.cfg.get("stack_type", "")).strip()
 
-            app_scoped_key = f"{app_stack}_{app_stack_type}".strip("_").lower()
-            if app_scoped_key in self.cfg:
-                rctx = deep_merge(rctx, self.cfg[app_scoped_key])
+                if "/" in raw_stack:
+                    app_stack, derived_type = raw_stack.split("/", 1)
+                    app_stack = app_stack.lower()
+                    app_stack_type = raw_type.lower() or derived_type.lower()
+                else:
+                    app_stack = raw_stack.lower()
+                    app_stack_type = raw_type.lower() or "base"
 
-            rctx.setdefault("app_project_name", f"{base.get('project_snake','project')}_{ctx_name}")
-            rctx.setdefault("app_stack", app_stack)
-            rctx.setdefault("app_stack_type", app_stack_type)
+                app_defaults = self.tmpl_src.get_stacked_defaults(f"stacks/{app_stack}/{app_stack_type}/_")
+                rctx = deep_merge(app_defaults, rctx)
 
-            for rel, data, is_j2, origin in all_app_resources:
-                root_prefix = active_prefix if active_prefix and rel.startswith(active_prefix) else (global_prefix if rel.startswith(global_prefix) else None)
-                if not root_prefix: continue
-                sub_rel = rel[len(root_prefix):]
-                dest_rel = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
-                target = self.repo / dest_rel
+                active_prefix = f"stacks/{app_stack}/{app_stack_type}/{resource_dir}/" if app_stack else None
+                base_prefix = f"stacks/{app_stack}/base/{resource_dir}/" if app_stack else None
+                global_prefix = f"{resource_dir}/global/"
 
-                if is_j2:
-                    raw_tpl = data.decode("utf-8", errors="replace")
-                    try: new_bytes = env.from_string(raw_tpl).render(**rctx).encode("utf-8")
-                    except Exception as e: raise RuntimeError(f"Jinja render error in apps resource '{rel}' → '{dest_rel}': {e}") from e
-                    tmpl_sha = sha256(raw_tpl.encode("utf-8"))
-                else: new_bytes, tmpl_sha = data, sha256(data)
+                rctx.setdefault("project_name", self.cfg.get("project_name") or "project")
+                rctx.setdefault("project_slug", slug(rctx["project_name"]))
+                rctx.setdefault("project_snake", snake(rctx["project_slug"]))
 
-                old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
-                hm = _header_managed_default(dest_rel)
-                cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
-                status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
-                diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
+                app_scoped_key = f"{app_stack}_{app_stack_type}".strip("_").lower()
+                if app_scoped_key in self.cfg:
+                    rctx = deep_merge(rctx, self.cfg[app_scoped_key])
 
-                is_exec = False
-                if hasattr(origin, "exists") and origin.exists():
-                    import os
-                    is_exec = os.access(origin, os.X_OK)
+                for rel, data, is_j2, origin in all_resources:
+                    root_prefix = active_prefix if active_prefix and rel.startswith(active_prefix) else (base_prefix if base_prefix and rel.startswith(base_prefix) else (global_prefix if rel.startswith(global_prefix) else None))
+                    if not root_prefix: continue
 
-                plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, True, diff_text, new_bytes, tmpl_sha, f"apps.{ctx_name}", hm, is_exec))
+                    sub_rel = rel[len(root_prefix):]
+                    dest_rel = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
+                    target = self.repo / dest_rel
+
+                    if is_j2:
+                        raw_tpl = data.decode("utf-8", errors="replace")
+                        try: new_bytes = env.from_string(raw_tpl).render(**rctx).encode("utf-8")
+                        except Exception as e: raise RuntimeError(f"Jinja render error in subproject resource '{rel}' → '{dest_rel}': {e}") from e
+                        tmpl_sha = sha256(raw_tpl.encode("utf-8"))
+                    else: new_bytes, tmpl_sha = data, sha256(data)
+
+                    old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+                    hm = _header_managed_default(dest_rel)
+                    cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
+                    status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
+                    diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
+
+                    is_exec = False
+                    if hasattr(origin, "exists") and origin.exists():
+                        import os
+                        is_exec = os.access(origin, os.X_OK)
+
+                    plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, True, diff_text, new_bytes, tmpl_sha, f"{block_name}.{ctx_name}", hm, is_exec))
         return plan
