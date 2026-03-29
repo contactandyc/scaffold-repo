@@ -44,15 +44,16 @@ scaffold-repo --create my-python-app
 
 ## Examples that use scaffold-repo
 
-- https://github.com/contactandyc/the-macro-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/a-json-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/a-json-sax-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/a-json-schema-builder-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/a-curl-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/a-map-reduce-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/a-memory-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/sql-parser-library.git/blob/main/scaffold.yaml
-- https://github.com/contactandyc/the-io-library.git/blob/main/scaffold.yaml
+- [the-macro-library](https://github.com/contactandyc/the-macro-library.git) [scaffold.yaml](https://github.com/contactandyc/the-macro-library.git/blob/main/scaffold.yaml)
+- [a-json-library](https://github.com/contactandyc/a-json-library.git) [scaffold.yaml](https://github.com/contactandyc/a-json-library.git/blob/main/scaffold.yaml)
+- [a-json-sax-library](https://github.com/contactandyc/a-json-sax-library.git) [scaffold.yaml](https://github.com/contactandyc/a-json-sax-library.git/blob/main/scaffold.yaml)
+- [a-json-schema-builder-library](https://github.com/contactandyc/a-json-schema-builder-library.git) [scaffold.yaml](https://github.com/contactandyc/a-json-schema-builder-library.git/blob/main/scaffold.yaml)
+- [a-curl-library](https://github.com/contactandyc/a-curl-library.git) [scaffold.yaml](https://github.com/contactandyc/a-curl-library.git/blob/main/scaffold.yaml)
+- [a-map-reduce-library](https://github.com/contactandyc/a-map-reduce-library.git) [scaffold.yaml](https://github.com/contactandyc/a-map-reduce-library.git/blob/main/scaffold.yaml)
+- [a-memory-library](https://github.com/contactandyc/a-memory-library.git) [scaffold.yaml](https://github.com/contactandyc/a-memory-library.git/blob/main/scaffold.yaml)
+- [sql-parser-library](https://github.com/contactandyc/sql-parser-library.git) [scaffold.yaml](https://github.com/contactandyc/sql-parser-library.git/blob/main/scaffold.yaml)
+- [the-io-library](https://github.com/contactandyc/the-io-library.git) [scaffold.yaml](https://github.com/contactandyc/the-io-library.git/blob/main/scaffold.yaml)
+- [the-lz4-library](https://github.com/contactandyc/the-lz4-library.git) [scaffold.yaml](https://github.com/contactandyc/the-lz4-library.git/blob/main/scaffold.yaml)
 
 
 *The engine asks what stack you want (e.g., Python, C++), applies your organizational profile, generates the initial code, and locks the configuration into a local `scaffold.yaml`.*
