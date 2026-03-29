@@ -42,6 +42,28 @@ scaffold-repo --init
 scaffold-repo --create my-python-app
 ```
 
+## Examples that use scaffold-repo
+
+- https://github.com/contactandyc/a-bitset-library.git
+- https://github.com/contactandyc/a-curl-library.git
+- https://github.com/contactandyc/a-curl-openai-plugin.git
+- https://github.com/contactandyc/a-json-library.git
+- https://github.com/contactandyc/a-json-sax-library.git
+- https://github.com/contactandyc/a-json-schema-builder-library.git
+- https://github.com/contactandyc/a-map-reduce-library.git
+- https://github.com/contactandyc/a-memory-library.git
+- https://github.com/contactandyc/a-sentence-chunker-library.git
+- https://github.com/contactandyc/a-tokenizer-library.git
+- https://github.com/contactandyc/an-encryption-library.git
+- https://github.com/contactandyc/embedding-library.git
+- https://github.com/contactandyc/search-index-library.git
+- https://github.com/contactandyc/sql-parser-library.git
+- https://github.com/contactandyc/stemmer-library.git
+- https://github.com/contactandyc/the-io-library.git
+- https://github.com/contactandyc/the-lz4-library.git
+- https://github.com/contactandyc/the-macro-library.git
+
+
 *The engine asks what stack you want (e.g., Python, C++), applies your organizational profile, generates the initial code, and locks the configuration into a local `scaffold.yaml`.*
 
 **3. Build and Develop predictably:**

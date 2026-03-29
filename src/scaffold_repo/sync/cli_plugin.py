@@ -14,7 +14,7 @@ def add_sync_arguments(parser: argparse.ArgumentParser) -> None:
     """Appends all template synchronization and diffing arguments."""
     grp_sc = parser.add_argument_group("Scaffolding Options")
     grp_sc.add_argument("--update", action="store_true", help="Explicitly apply template updates to the repositories")
-    grp_sc.add_argument("--diff", action="store_true", help="Print unpaginated Git diffs")
+    grp_sc.add_argument("--diff", nargs="?", const="AUTO", metavar="BRANCH", help="Print Git diffs against the parent branch (or a specified branch)")
     grp_sc.add_argument("-y", "--assume-yes", action="store_true", help="Apply template updates without prompting")
     grp_sc.add_argument("--show-diffs", action="store_true", help="Print inline diffs before applying updates")
 

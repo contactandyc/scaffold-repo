@@ -5,6 +5,7 @@ import posixpath
 import sys
 import os
 import glob
+import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -23,22 +24,18 @@ def _extract_dep_name(raw_dep: Any) -> str:
     Parses a dependency definition (which could be a URL, a git SSH string, a dictionary,
     or a plain string) and extracts a clean, base name for the dependency.
     """
-    # If the dependency is a dictionary, try to extract the URL or source string
     if isinstance(raw_dep, dict):
         if len(raw_dep) == 1:
             k = next(iter(raw_dep))
-            # Handle cases where the key itself is the URL
             if k.startswith(("http://", "https://", "git@")): raw_dep = k
         if isinstance(raw_dep, dict):
             raw_dep = raw_dep.get("url") or raw_dep.get("source") or ""
 
     s = str(raw_dep).strip()
 
-    # Strip out protocols and version tags to isolate the package name
     if "+" in s and "://" not in s.split("+", 1)[0]: s = s.split("+", 1)[1]
     if "@" in s: s = s.rsplit("@", 1)[0]
 
-    # If it's a remote URL, extract the final path segment and drop the .git extension
     if s.startswith(("http://", "https://", "git@")): return s.split("/")[-1].replace(".git", "")
     return s
 
@@ -53,7 +50,6 @@ class ConfigReader:
         self.project_name: str | None = project_name
         self.is_init = is_init
 
-        # Resolve the base directory for templates, handling relative/absolute paths
         base_dir = None
         if base_templates_dir:
             base_dir = Path(base_templates_dir)
@@ -66,28 +62,17 @@ class ConfigReader:
 
     @property
     def effective_config(self) -> dict:
-        """Returns the fully parsed and merged configuration dictionary."""
         return self.cfg
 
     def get_planner(self) -> TemplatePlanner:
-        """
-        Instantiates a TemplatePlanner using the current loaded configuration
-        and enabled packages to dictate which files get generated.
-        """
         self.cfg["package_patterns"] = self.package_patterns
         self.cfg["enabled_packages"] = self.enabled_packages
         return TemplatePlanner(self.repo, self.tmpl_src, self.cfg, self.is_init)
 
     def load(self) -> None:
-        """
-        The main orchestration method. It finds the local configuration, handles remote
-        template fetching, merges various YAML registries, resolves includes, and
-        normalizes the data into a final usable state.
-        """
         local_manifest = self.repo / "scaffold.yaml"
         local_data = {}
 
-        # Locate global/workspace config (.scaffoldrc)
         rc_cfg = find_scaffoldrc(self.repo)
         ws_dir = Path(rc_cfg.get("workspace_dir") or self.repo.parent).resolve()
 
@@ -95,26 +80,22 @@ class ConfigReader:
         ref = "main"
         custom_path = None
 
-        # Attempt to read the project's local scaffold.yaml
         if local_manifest.exists():
             try:
                 local_data = yaml.safe_load(local_manifest.read_text(encoding="utf-8")) or {}
             except Exception as e:
                 print(f"Warning: Failed to parse local {local_manifest}:\n{e}", file=sys.stderr)
 
-            # Check if local config specifies a remote template repository to inherit from
             base_tmpl = local_data.get("base_templates")
             if isinstance(base_tmpl, dict) and "repo" in base_tmpl:
                 url = base_tmpl["repo"]
                 ref = base_tmpl.get("ref", "main")
                 custom_path = base_tmpl.get("path")
 
-        # Fallback to workspace/rc config if local doesn't specify a remote registry
         if not url and rc_cfg.get("template_registry_url"):
             url = rc_cfg.get("template_registry_url")
             ref = rc_cfg.get("template_registry_ref", "main")
 
-        # Sync remote templates if a URL is provided
         if url:
             cached_dir = sync_git_template_repo(url, ref, ws_dir)
             if cached_dir:
@@ -125,16 +106,13 @@ class ConfigReader:
                         new_base = cached_dir
                 else:
                     new_base = cached_dir / "templates" if (cached_dir / "templates").is_dir() else cached_dir
-
                 self.tmpl_src = TemplateSource(base_dir=new_base)
 
-        # Load default configuration from the template source
         self.cfg = self.tmpl_src.load_defaults_yaml() or {}
 
         if rc_cfg.get("workspace_dir"):
             self.cfg["workspace_dir"] = rc_cfg["workspace_dir"]
 
-        # Deep merge libraries, apps, and licenses from the template registry
         for f in self.tmpl_src.find_registry_yamls("libraries"):
             data = self.tmpl_src._load_logical_path(f)
             if data and "libraries" in data:
@@ -153,10 +131,8 @@ class ConfigReader:
                 self.cfg.setdefault("licenses", {})
                 self.cfg["licenses"] = deep_merge(self.cfg["licenses"], data["licenses"])
 
-        # Determine the primary project scope based on matched names
         self._select_project()
 
-        # Handle 'includes' defined in the local scaffold.yaml
         if local_data:
             raw_includes = local_data.pop("includes", [])
             if not isinstance(raw_includes, list): raw_includes = [raw_includes]
@@ -175,7 +151,6 @@ class ConfigReader:
                 exclude_keys = coerce_list(inc.get("exclude", []))
 
                 inc_data = {}
-                # Fetch remote yaml includes or load local logical paths
                 if source.startswith(("http://", "https://")):
                     from ..templating.source import _fetch_remote_yaml
                     inc_data = _fetch_remote_yaml(source, ref=ref, file_path=file_path)
@@ -185,7 +160,6 @@ class ConfigReader:
                         inc_str += ".yaml"
                     inc_data = self.tmpl_src._load_logical_path(inc_str)
 
-                # Filter included data based on include/exclude keys
                 if isinstance(inc_data, dict):
                     if include_keys:
                         inc_data = {k: v for k, v in inc_data.items() if k in include_keys}
@@ -194,11 +168,9 @@ class ConfigReader:
 
                 base = deep_merge(base, inc_data)
 
-            # Merge includes, then apply local data on top
             self.cfg = deep_merge(self.cfg, base)
             self.cfg = deep_merge(self.cfg, local_data)
 
-            # Apply "stack" defaults (e.g., C++, Python, generic base config)
             raw_stack = str(self.cfg.get("stack") or "").strip()
             if raw_stack:
                 st = raw_stack.split("/")[0].lower()
@@ -206,30 +178,24 @@ class ConfigReader:
                 stack_defaults = self.tmpl_src.get_stacked_defaults(f"stacks/{st}/{st_type}/_")
                 self.cfg = deep_merge(stack_defaults, self.cfg)
 
-            # This catches `profile` whether it was defined in the leaf repo OR the stack defaults
             prof = self.cfg.get("profile")
             if prof:
                 prof_file = f"{prof}.yaml" if not str(prof).endswith((".yaml", ".yml")) else str(prof)
                 prof_data = self.tmpl_src._load_logical_path(f"profiles/{prof_file}")
                 if prof_data:
-                    # Merge the profile underneath the current config, so local overrides always win
                     self.cfg = deep_merge(prof_data, self.cfg)
-            # -----------------------------------------------------
 
-            # Establish standardized string formats for the project name (slug, snake_case, camelCase)
             nm = self.project_name or local_data.get("project_name") or local_data.get("project_title") or self.repo.name
             self.cfg["project_name"] = nm
             self.cfg["project_slug"] = slug(nm)
             self.cfg["project_snake"] = local_data.get("project_snake") or snake(nm) or nm
             self.cfg["project_camel"] = local_data.get("project_camel") or camel(nm)
 
-            # Ensure the current project is registered in the libraries dict
             self.cfg.setdefault("libraries", {})
             lib_entry = dict(local_data)
             lib_entry["name"] = nm
             self.cfg["libraries"][self.cfg["project_slug"]] = lib_entry
 
-        # Run final data normalization passes
         self._render_contributors()
         self._normalize_keys_autofill()
         self._expand_library_templates()
@@ -237,10 +203,6 @@ class ConfigReader:
         self._compute_package_switches()
 
     def _render_contributors(self) -> None:
-        """
-        Evaluates Jinja2 template strings within the 'contributors' dictionary
-        so properties can dynamically reference other config values.
-        """
         contribs = self.cfg.get("contributors") or {}
         if not isinstance(contribs, dict) or not contribs: return
         env = Environment(undefined=StrictUndefined, autoescape=False)
@@ -256,16 +218,11 @@ class ConfigReader:
         self.cfg["contributors"] = {key: (render_fields(val) if isinstance(val, dict) else val) for key, val in contribs.items()}
 
     def _select_project(self) -> None:
-        """
-        Identifies if the provided project_name matches a predefined library or app
-        in the registries, and if so, merges that specific component's config into the root.
-        """
         proj = self.project_name or self.cfg.get("project_name")
         if not proj: return
         proj_str = str(proj).strip()
         proj_base = posixpath.basename(proj_str)
 
-        # Handle direct path references
         if "/" in proj_str:
             for pth in [f"libraries/{proj_str}.yaml", f"apps/{proj_str}.yaml"]:
                 extra_data = self.tmpl_src._load_logical_path(pth)
@@ -276,7 +233,6 @@ class ConfigReader:
         want_slug, want_snake = slug(proj_base), snake(proj_base)
         picked = None
 
-        # Search the registries for a match against the slug/snake representations
         for category in ["libraries", "apps"]:
             items = self.cfg.get(category) or {}
             iterable_items = items.items() if isinstance(items, dict) else enumerate(items)
@@ -293,9 +249,7 @@ class ConfigReader:
         if not self.cfg.get("project_name"): self.cfg["project_name"] = picked.get("name") or proj_base
 
     def _predict_template_files(self, resource_dir: str | None = None) -> list[str]:
-        """Peers into the templates to predict what files will be created before they exist."""
         import re
-        import yaml
         from jinja2 import Environment
 
         found = []
@@ -337,7 +291,6 @@ class ConfigReader:
         return found
 
     def _auto_discover_targets(self, rule: dict, dest_dir: Path) -> dict:
-        """Globs the source directories and formats them according to the strategy."""
         import fnmatch
 
         source_globs = coerce_list(rule.get("source_globs") or ["*"])
@@ -351,14 +304,16 @@ class ConfigReader:
             for pattern in source_globs:
                 for p in search_base.rglob(pattern.replace("**/", "")) if "**" in pattern else search_base.glob(pattern):
                     if p.is_file():
-                        discovered_files.append(p.relative_to(self.repo).as_posix())
+                        discovered_files.append(p.relative_to(self.repo / dest_dir).as_posix())
         else:
             predicted_files = self._predict_template_files(rule.get("resource"))
+            dest_prefix = dest_dir.as_posix()
             for predicted_dest in predicted_files:
-                if predicted_dest.startswith(search_base.relative_to(self.repo).as_posix()):
+                if dest_prefix == "." or predicted_dest.startswith(dest_prefix + "/"):
                     for pattern in source_globs:
                         if fnmatch.fnmatch(Path(predicted_dest).name, pattern):
-                            discovered_files.append(predicted_dest)
+                            rel_p = predicted_dest if dest_prefix == "." else predicted_dest[len(dest_prefix)+1:]
+                            discovered_files.append(rel_p)
                             break
 
         discovered_files = sorted(list(set(discovered_files)))
@@ -371,8 +326,106 @@ class ConfigReader:
             proj_snake = self.cfg.get("project_snake", "project")
             return {proj_snake: {"sources": discovered_files}}
 
+    def _normalize_subprojects(self, idx: dict, proj_slug: str) -> None:
+        rules = self.cfg.get("subproject_rules", {})
+        reserved = {"depends_on", "context"}
+
+        # ── ZERO-CONFIG MAGIC ──
+        for implicit_key in ["main", "tests"]:
+            if implicit_key in rules and implicit_key not in self.cfg:
+                self.cfg[implicit_key] = {}
+
+        for block_name, rule in rules.items():
+            block_data = self.cfg.get(block_name)
+            if not isinstance(block_data, dict): continue
+
+            suite_ctx = dict(block_data.get("context") or {})
+            suite_ctx["depends_on"] = coerce_list(block_data.get("depends_on", []))
+
+            out = {}
+
+            # ── THE FIX: Flat vs Grouped Detection ──
+            # If the block has standard target keys at the root, it's flat!
+            flat_keys = {"targets", "find_packages", "link_libraries", "include_dirs", "sources"}
+            is_flat = any(k in block_data for k in flat_keys) or not any(k for k in block_data.keys() if k not in reserved)
+
+            items_to_process = {"": block_data} if is_flat else block_data
+
+            for item_name, item_cfg in items_to_process.items():
+                if item_name in reserved: continue
+
+                # Safe fallback if they used shorthand at the group level too
+                if not isinstance(item_cfg, dict):
+                    item_cfg = {"targets": item_cfg}
+
+                ctx = deep_merge(suite_ctx, dict(item_cfg or {}))
+
+                if block_name == "main":
+                    ctx["_dest_dir"] = "."
+                else:
+                    ctx["_dest_dir"] = f"{block_name}/{item_name}" if item_name else f"{block_name}"
+
+                is_auto_discovered = "targets" not in ctx
+                discovered = {}
+
+                # ── SHORTHAND ROUTING VARIABLES ──
+                targets_dir = rule.get("targets_dir", "")
+                default_ext = rule.get("default_ext", "c")
+
+                if is_auto_discovered:
+                    discovered = self._auto_discover_targets(rule, self.repo / ctx["_dest_dir"])
+                    ctx["targets"] = self._normalize_build_targets(discovered, self.repo / ctx["_dest_dir"], targets_dir, default_ext)
+                else:
+                    ctx["targets"] = self._normalize_build_targets(ctx["targets"], self.repo / ctx["_dest_dir"], targets_dir, default_ext)
+
+                # Ensure discovered targets don't overwrite the cleaner include_dirs from _auto_discover_targets
+                if is_auto_discovered and discovered:
+                    for t in ctx["targets"]:
+                        if t["name"] in discovered:
+                            t["include_dirs"] = discovered[t["name"]].get("include_dirs", [])
+
+                # FIX 1: Grab global dependencies from the root of scaffold.yaml
+                global_deps = coerce_list(self.cfg.get("depends_on", []))
+
+                # Combine global + suite + specific item dependencies
+                union_deps = [str(x) for x in global_deps + coerce_list(suite_ctx.get("depends_on")) + coerce_list(ctx.get("depends_on"))]
+                for tgt in ctx["targets"]:
+                    union_deps.extend(str(nm) for nm in tgt.get("depends_on", []))
+
+                # FIX 2: Ensure subprojects (tests, apps, examples) ALWAYS link to the main library!
+                if proj_slug and block_name != "main" and proj_slug not in union_deps:
+                    union_deps.append(proj_slug)
+
+                lib_slugs = self._resolve_dep_names_to_lib_slugs(dedupe(union_deps), idx)
+                finds, links = [], []
+
+                for s in lib_slugs:
+                    if s not in idx: continue
+                    # Do not find_package ourselves if we are linking in-tree!
+                    if s == proj_slug:
+                        links.extend(idx[s].get("links", []))
+                    else:
+                        finds.extend(idx[s].get("finds", []))
+                        links.extend(idx[s].get("links", []))
+
+                ctx.setdefault("find_packages", dedupe(finds))
+                ctx.setdefault("link_libraries", dedupe(links))
+
+                ctx["targets_dir"] = targets_dir
+
+                name_key = item_name if item_name else "default"
+                ctx["name"] = name_key
+
+                if ctx["targets"]:
+                    out[name_key] = ctx
+
+            self.cfg[block_name] = out
+
+            if block_name != "main" and out:
+                for ctx in out.values():
+                    self.cfg.setdefault("active_subprojects", []).append(ctx["_dest_dir"])
+
     def _normalize_keys_autofill(self) -> None:
-        """Fills in missing configuration values."""
         raw_stack = str(self.cfg.get("stack") or "").strip()
         if "/" in raw_stack:
             st, st_type = raw_stack.split("/", 1)
@@ -385,39 +438,7 @@ class ConfigReader:
         if not self.cfg.get("stack_type"):
             self.cfg["stack_type"] = "base"
 
-        # 1. Auto-discover main library sources (The Sovereign Core)
-        dp = dict(self.cfg.get("deps") or {})
-        ps = self.cfg.get("project_snake") or "project"
-
-        lib_srcs = self.cfg.get("library_sources") or dp.get("sources")
-        if not lib_srcs:
-            # ── THE MAIN RULE ──
-            # Look for the 'main' rule inside the subproject rules
-            rules = self.cfg.get("subproject_rules", {})
-            main_rule = rules.get("main") or {
-                "targets_dir": "src",
-                "source_globs": ["*"],
-                "discovery_strategy": "aggregate"
-            }
-
-            # Run the generic discoverer against the root directory (Path("."))
-            discovered = self._auto_discover_targets(main_rule, Path("."))
-
-            # The discoverer returns a dict mapping e.g., {"my_lib": {"sources": [...]}}
-            # We just want to extract the flat list of sources for the main project.
-            if discovered:
-                first_key = next(iter(discovered))
-                auto = discovered[first_key].get("sources", [])
-                if auto:
-                    lib_srcs = sorted(auto)
-
-        norm_srcs = [str(s) for s in (lib_srcs if isinstance(lib_srcs, (list, tuple)) else [lib_srcs])] if lib_srcs else []
-        self.cfg["library_sources"] = dp["sources"] = norm_srcs
-        self.cfg["deps"] = dp
-
-        # 2. Standardize copyrights & contacts
-        import datetime
-        current_year = str(self.cfg.get("date") or "")[:4]
+        current_year = str(self.cfg.get("date") or datetime.date.today().year)[:4]
         self.cfg["year"] = current_year
         raw_created = str(self.cfg.get("date_created") or "")
         default_start_year = raw_created[:4] if len(raw_created) >= 4 else current_year
@@ -426,7 +447,7 @@ class ConfigReader:
         def _render_val(val):
             if isinstance(val, str) and "{{" in val:
                 try: return env.from_string(val).render(**self.cfg)
-                except Exception as e: return val
+                except Exception: return val
             return val
 
         def _resolve_entity_ref(val):
@@ -495,7 +516,6 @@ class ConfigReader:
 
         all_roots = [proj_slug]
 
-        # Gather all dependencies globally across all generic subproject rules
         rules = self.cfg.get("subproject_rules", {})
         for block_name in rules.keys():
             block_data = self.cfg.get(block_name)
@@ -529,10 +549,8 @@ class ConfigReader:
 
         self.cfg["deps"] = dp
 
-        # Delegate resolution to the generic subproject engine
         self._normalize_subprojects(idx, proj_slug)
 
-        # Developer APT packages
         dev_pkgs = []
         for pkg, constraint in (self.cfg.get("dev_packages") or {}).items() if isinstance(self.cfg.get("dev_packages"), dict) else {p: True for p in coerce_list(self.cfg.get("dev_packages"))}.items():
             if constraint is False or constraint is None: continue
@@ -547,61 +565,7 @@ class ConfigReader:
         for k in ["sources", "libraries", "deps_for_config", "apt_packages", "apt_dev_packages", "find_packages", "pkg_config_deps", "link_libraries", "depends_on"]: dp.setdefault(k, [])
         self.cfg["deps"] = dp
 
-    def _normalize_subprojects(self, idx: dict, proj_slug: str) -> None:
-        """Processes any generic subprojects based on stack rules."""
-        rules = self.cfg.get("subproject_rules", {})
-        reserved = {"depends_on", "context"}
-
-        for block_name, rule in rules.items():
-            block_data = self.cfg.get(block_name)
-            if not isinstance(block_data, dict): continue
-
-            suite_ctx = dict(block_data.get("context") or {})
-            suite_ctx["depends_on"] = coerce_list(block_data.get("depends_on", []))
-
-            out = {}
-            for item_name, item_cfg in block_data.items():
-                if item_name in reserved: continue
-
-                ctx = deep_merge(suite_ctx, dict(item_cfg or {}))
-
-                # Convention: If empty key used, destination is the block root. Otherwise block/item
-                ctx["_dest_dir"] = f"{block_name}/{item_name}" if item_name else f"{block_name}"
-
-                # 1. Discover and format targets
-                if "targets" not in ctx:
-                    discovered = self._auto_discover_targets(rule, self.repo / ctx["_dest_dir"])
-                    ctx["targets"] = self._normalize_build_targets(discovered, self.repo / ctx["_dest_dir"])
-                else:
-                    ctx["targets"] = self._normalize_build_targets(ctx["targets"], self.repo / ctx["_dest_dir"])
-
-                # 2. Resolve linkers and find_packages for this context
-                union_deps = [str(x) for x in coerce_list(suite_ctx.get("depends_on")) + coerce_list(ctx.get("depends_on"))]
-                for tgt in ctx["targets"]:
-                    union_deps.extend(str(nm) for nm in tgt.get("depends_on", []))
-
-                if not union_deps and proj_slug: union_deps.append(proj_slug)
-
-                lib_slugs = self._resolve_dep_names_to_lib_slugs(dedupe(union_deps), idx)
-                if lib_slugs:
-                    finds, links = self._derive_suite_deps_from_libs(lib_slugs, idx)
-                    ctx.setdefault("find_packages", finds)
-                    ctx.setdefault("link_libraries", links)
-
-                # Export the targets_dir for Jinja to use in includes
-                ctx["targets_dir"] = rule.get("targets_dir", "")
-
-                name_key = item_name if item_name else "default"
-                ctx["name"] = name_key
-                out[name_key] = ctx
-
-            self.cfg[block_name] = out
-
     def _expand_library_templates(self) -> None:
-        """
-        Applies shared library templates to individual library configurations.
-        If a library sets `template: <name>`, it merges the definition from `library_templates`.
-        """
         templates = self.cfg.get("library_templates") or {}
         env = Environment(undefined=StrictUndefined, autoescape=False)
         def to_dict(val):
@@ -629,7 +593,6 @@ class ConfigReader:
                 continue
 
             tmpl_data = {}
-            # Resolving template source: remote, local dict, or named reference
             if isinstance(tmpl_name, dict):
                 tmpl_data = tmpl_name
             elif str(tmpl_name).startswith(("http://", "https://")):
@@ -641,7 +604,6 @@ class ConfigReader:
                 out[key] = lib
                 continue
 
-            # Merge the template defaults with the specific library overrides
             merged = deep_merge(tmpl_data, lib)
             nm = str(merged.get("name") or posixpath.basename(str(key))).strip()
             derived = {
@@ -651,7 +613,6 @@ class ConfigReader:
             if "project_name" not in merged: derived["project_name"] = derived["project_snake"]
 
             ctx = {**self.cfg, **derived, **merged}
-            # Recursively render templated variables within the library config
             def render_any(obj):
                 if isinstance(obj, str):
                     try: return env.from_string(obj).render(**ctx)
@@ -664,16 +625,10 @@ class ConfigReader:
         self.cfg["libraries"] = list(out.values()) if isinstance(raw_libs, list) else out
 
     def _build_library_index(self, cfg: dict) -> dict[str, dict]:
-        """
-        Creates a dependency map containing metadata (pkg-configs, cmake links, find packages)
-        for all defined libraries. Dynamically infers Git dependencies and fetches their
-        internal configs from the workspace folder if available.
-        """
         raw_libs = cfg.get("libraries") or {}
         idx: dict[str, dict] = {}
         iterable = raw_libs.items() if isinstance(raw_libs, dict) else enumerate(raw_libs)
 
-        # 1. Register explicitly configured libraries into the index
         for key, item in iterable:
             if not isinstance(item, dict): continue
 
@@ -704,31 +659,22 @@ class ConfigReader:
         if not workspace_dir.is_absolute():
             workspace_dir = (self.repo / workspace_dir).resolve()
 
-        # 2. Gather all top-level explicit dependencies listed in libraries, apps, and tests
         all_explicit_deps = []
         for v in idx.values(): all_explicit_deps.extend(v["depends_raw"])
 
-        tests_cfg = self.cfg.get("tests", {})
-        if isinstance(tests_cfg, dict):
-            all_explicit_deps.extend(coerce_list(tests_cfg.get("depends_on", [])))
-            for t in (tests_cfg.get("targets") or []):
-                if isinstance(t, dict):
-                    all_explicit_deps.extend(coerce_list(t.get("depends_on", [])))
+        rules = self.cfg.get("subproject_rules", {})
+        for block_name in rules.keys():
+            block_data = self.cfg.get(block_name)
+            if not isinstance(block_data, dict): continue
+            all_explicit_deps.extend(coerce_list(block_data.get("depends_on", [])))
+            for item_name, item_cfg in block_data.items():
+                if item_name in ("context", "depends_on"): continue
+                if isinstance(item_cfg, dict):
+                    all_explicit_deps.extend(coerce_list(item_cfg.get("depends_on", [])))
+                    for tgt in coerce_list(item_cfg.get("targets", [])):
+                        if isinstance(tgt, dict):
+                            all_explicit_deps.extend(coerce_list(tgt.get("depends_on", [])))
 
-        apps_cfg = self.cfg.get("apps", {})
-        if isinstance(apps_cfg, dict):
-            app_ctx = apps_cfg.get("context", {})
-            if isinstance(app_ctx, dict):
-                all_explicit_deps.extend(coerce_list(app_ctx.get("depends_on", [])))
-
-            for app_name, app_cfg in apps_cfg.items():
-                if isinstance(app_cfg, dict):
-                    all_explicit_deps.extend(coerce_list(app_cfg.get("depends_on", [])))
-                    for b in (app_cfg.get("binaries") or []):
-                        if isinstance(b, dict):
-                            all_explicit_deps.extend(coerce_list(b.get("depends_on", [])))
-
-        # 3. Helper to synthesize implicit/external dependencies into the index
         def _synthesize(d_raw):
             dep_name = _extract_dep_name(d_raw)
             if not dep_name: return None
@@ -740,7 +686,6 @@ class ConfigReader:
                 clean_url = url_str.split("+", 1)[-1] if "+" in str(url_str) else str(url_str)
                 clean_url = clean_url.split("@", 1)[0]
 
-                # Create build steps for git dependencies
                 build_steps = []
                 if clean_url.startswith(("http", "https://", "git@")):
                     build_steps = [
@@ -761,7 +706,6 @@ class ConfigReader:
                 }
                 by_snake[target_snake] = s
 
-                # Try to peek into the dependency's own scaffold.yaml to find nested dependencies
                 dep_manifest = workspace_dir / dep_name / "scaffold.yaml"
                 if dep_manifest.exists():
                     try:
@@ -770,10 +714,8 @@ class ConfigReader:
                     except Exception: pass
             return s if s in idx else by_snake.get(snake(dep_name))
 
-        # 4. Resolve the explicit deps against the index
         for d in dedupe(all_explicit_deps): _synthesize(d)
 
-        # 5. Iteratively process and link nested dependency arrays (breadth-first traversal)
         to_process = list(idx.keys())
         processed = set()
         while to_process:
@@ -795,10 +737,6 @@ class ConfigReader:
         return idx
 
     def _collect_transitive(self, idx: dict[str, dict], roots: Iterable[str], *, exclude_roots=False) -> list[str]:
-        """
-        Traverses the dependency tree index starting from the `roots` to find all nested dependencies.
-        Returns a flat list of dependency slugs.
-        """
         roots = [r for r in roots if r in idx]
         seen, stack = set(), list(roots)
         while stack:
@@ -810,10 +748,6 @@ class ConfigReader:
         return list(seen)
 
     def _toposort_subset(self, idx: dict[str, dict], subset: Iterable[str]) -> list[str]:
-        """
-        Performs a topological sort on a subset of the dependency graph using Kahn's algorithm.
-        Ensures that dependencies are listed in the correct linking order (dependents before dependencies).
-        """
         S = set(subset)
         adj, indeg = {s: [] for s in S}, {s: 0 for s in S}
         for s in S:
@@ -834,9 +768,6 @@ class ConfigReader:
         return ordered
 
     def _gather_apt_packages(self, cfg: dict, idx: dict[str, dict], proj_slug: str) -> list[str]:
-        """
-        Collects all transitive 'system' dependencies configured via APT for a specific project slug.
-        """
         if proj_slug not in idx: return []
         pkgs = []
         for s in set(self._collect_transitive(idx, [proj_slug], exclude_roots=True)):
@@ -846,20 +777,22 @@ class ConfigReader:
             pkgs.extend([str(x) for x in pkg if str(x).strip()] if isinstance(pkg, (list, tuple)) else [str(pkg)])
         return dedupe([p for p in pkgs if p and str(p).lower() not in ("none", "null")])
 
-    def _normalize_build_targets(self, raw_items: Any, abs_dest_dir: Path, default_src_dir: str = "") -> list[dict]:
-        """
-        Converts messy user inputs for build targets (which could be strings, lists of sources,
-        or dictionaries) into a standardized list of dictionaries with normalized source paths
-        and expanded glob patterns.
-        """
+    def _normalize_build_targets(self, raw_items: Any, abs_dest_dir: Path, targets_dir: str = "", default_ext: str = "c") -> list[dict]:
         if not raw_items: return []
         b_dict = {}
-        # Parse inputs into a standard dictionary
+
+        # The Shorthand Magic Helper
+        def _make_default_src(name: str) -> str:
+            return f"{targets_dir}/{name}.{default_ext}" if targets_dir else f"{name}.{default_ext}"
+
         if isinstance(raw_items, list):
             for item in raw_items:
-                if isinstance(item, str) and item.strip(): b_dict[item.strip()] = {"sources": [f"{default_src_dir}/{item.strip()}.c" if default_src_dir else f"{item.strip()}.c"]}
+                if isinstance(item, str) and item.strip():
+                    name = item.strip()
+                    b_dict[name] = {"sources": [_make_default_src(name)]}
                 elif isinstance(item, dict) and item:
-                    if "name" in item: b_dict[str(item.pop("name")).strip()] = item
+                    if "name" in item:
+                        b_dict[str(item.pop("name")).strip()] = item
                     else:
                         k = next(iter(item.keys()))
                         v = item[k]
@@ -871,14 +804,15 @@ class ConfigReader:
                 if isinstance(v, list): b_dict[str(k).strip()] = {"sources": v}
                 elif isinstance(v, str): b_dict[str(k).strip()] = {"sources": [v]}
                 elif isinstance(v, dict): b_dict[str(k).strip()] = v
-                elif v is None: b_dict[str(k).strip()] = {"sources": [f"{default_src_dir}/{k}.c" if default_src_dir else f"{k}.c"]}
-        else: b_dict[str(raw_items).strip()] = {"sources": [f"{default_src_dir}/{str(raw_items).strip()}.c" if default_src_dir else f"{str(raw_items).strip()}.c"]}
+                elif v is None: b_dict[str(k).strip()] = {"sources": [_make_default_src(str(k).strip())]}
+        else:
+            name = str(raw_items).strip()
+            b_dict[name] = {"sources": [_make_default_src(name)]}
 
         norm = []
-        # Expand wildcard patterns (* or ?) into absolute paths within the dest directory
         for name, conf in b_dict.items():
             if not name: continue
-            raw_sources = coerce_list(conf.get("sources") or [f"{default_src_dir}/{name}.c" if default_src_dir else f"{name}.c"])
+            raw_sources = coerce_list(conf.get("sources") or [_make_default_src(name)])
             expanded_sources, include_dirs = [], set()
             for src in raw_sources:
                 src_str = str(src).strip()
@@ -903,18 +837,13 @@ class ConfigReader:
                     include_dirs.add(posixpath.dirname(src_str) or ".")
 
             ent = {"name": name, "sources": dedupe(expanded_sources), "include_dirs": sorted(list(include_dirs))}
-            # Persist other linker/compiler flags
             for f in ("link_libraries", "depends_on", "find_packages"):
                 if conf.get(f) is not None: ent[f] = [str(x) for x in coerce_list(conf[f])]
             for f in ("c_standard", "cxx_standard"):
                 if f in conf: ent[f] = conf[f]
             norm.append(ent)
         return sorted(norm, key=lambda x: x["name"])
-
     def _resolve_dep_names_to_lib_slugs(self, dep_names: list[str], idx: dict) -> list[str]:
-        """
-        Translates a raw list of dependency strings into their respective library index slugs.
-        """
         by_snake = {v["snake"]: k for k, v in idx.items()}
         out = []
         for nm in dep_names or []:
@@ -926,83 +855,9 @@ class ConfigReader:
         return dedupe(out)
 
     def _derive_suite_deps_from_libs(self, lib_slugs: list[str], idx: dict) -> tuple[list[str], list[str]]:
-        """
-        Helper that extracts find_packages and link_libraries for a given list of library slugs.
-        """
         return dedupe([fp for s in lib_slugs for fp in idx[s]["finds"]]), dedupe([lk for s in lib_slugs for lk in idx[s]["links"]])
 
-    def _augment_tests_cfg(self, cfg: dict, idx: dict, proj_slug: str) -> dict:
-        """
-        Normalizes test target definitions and injects all missing find/link libraries required
-        by the dependency graph into the test suite configuration.
-        """
-        ts = dict(cfg.get("tests") or {})
-        norm_targets = self._normalize_build_targets(ts.get("targets") or ts.get("test_targets"), self.repo / "tests", "src")
-        if norm_targets: ts["targets"] = ts["test_targets"] = norm_targets
-        union_deps = [str(x) for x in coerce_list(ts.get("depends_on"))]
-        for t in (norm_targets or []): union_deps.extend(str(nm) for nm in t.get("depends_on") or [])
-        lib_slugs = self._resolve_dep_names_to_lib_slugs(union_deps, idx)
-
-        in_links, ext_finds, ext_links = [], [], []
-        for s in lib_slugs:
-            if s not in idx: continue
-            if s == proj_slug: in_links.extend(idx[s].get("links", []))
-            else:
-                ext_finds.extend(idx[s].get("finds", []))
-                ext_links.extend(idx[s].get("links", []))
-        ts.setdefault("find_packages", dedupe(ext_finds))
-        ts.setdefault("link_libraries", dedupe(in_links + ext_links))
-        cfg["tests"] = ts
-        return cfg
-
-    def _compute_app_dest_dir(self, base_dest: str, ctx_dest: str | None, ctx_name: str) -> str:
-        """
-        Calculates the relative directory structure where an app should be written based
-        on base overrides and local names.
-        """
-        base = (base_dest or "apps").strip("/")
-        return str(ctx_dest).strip().strip("/") if ctx_dest and str(ctx_dest).strip().startswith("/") else f"{base}/{(str(ctx_dest).strip('/') if ctx_dest else ctx_name)}"
-
-    def _normalize_apps_cfg(self, cfg: dict, idx: dict, proj_slug: str) -> dict:
-        """
-        Applies a shared 'context' to individual apps, normalizes their binary build targets,
-        resolves dependencies locally per app, and sets up CMake linkers/find packages.
-        """
-        apps = dict(cfg.get("apps") or {})
-        if not apps: return cfg
-        base_ctx = dict(apps.get("context") or {})
-        base_dest = str(base_ctx.get("dest") or "apps")
-        base_ctx_wo_dest = {k: v for k, v in base_ctx.items() if k != "dest"}
-
-        out = {}
-        for name, v in apps.items():
-            if name == "context": continue
-            # Merge base app context with specific app definition
-            ctx = deep_merge(base_ctx_wo_dest, dict(v or {}))
-            ctx["_apps_dest_dir"] = self._compute_app_dest_dir(base_dest, ctx.get("dest"), str(name))
-            ctx["binaries"] = self._normalize_build_targets(ctx.get("binaries"), self.repo / ctx["_apps_dest_dir"], "src")
-
-            # Combine the app's base dependencies with each specific binary's dependencies
-            union_deps = [str(x) for x in coerce_list(base_ctx_wo_dest.get("depends_on")) + coerce_list(ctx.get("depends_on"))]
-            for b in ctx["binaries"]: union_deps.extend(str(nm) for nm in b.get("depends_on") or [])
-            if not union_deps and proj_slug: union_deps.append(proj_slug)
-
-            lib_slugs = self._resolve_dep_names_to_lib_slugs(dedupe(union_deps), idx)
-            if lib_slugs:
-                finds, links = self._derive_suite_deps_from_libs(lib_slugs, idx)
-                ctx.setdefault("find_packages", finds)
-                ctx.setdefault("link_libraries", links)
-            out[str(name)] = ctx
-
-        apps.update(out)
-        cfg["apps"] = apps
-        return cfg
-
     def _compute_package_switches(self) -> None:
-        """
-        Extracts toggles and patterns for 'packages' (which are groups of templates or components).
-        Resolves conditional rendering for package filters.
-        """
         env = Environment(undefined=StrictUndefined)
         def render_pat(p):
             if "{{" in p:
@@ -1014,7 +869,6 @@ class ConfigReader:
         raw_pkgs = self.cfg.get("packages") or {}
         enabled, flavors = set(), {}
 
-        # Determine which packages are switched on, and if they have a specific 'flavor'
         if isinstance(raw_pkgs, dict):
             for pkg, val in raw_pkgs.items():
                 if val is False or val is None: continue

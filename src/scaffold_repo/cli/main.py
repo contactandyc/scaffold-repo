@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 import subprocess
+import posixpath
 from pathlib import Path
 
 # --- Resolvers & Workspace Tools ---
@@ -22,6 +23,7 @@ from ..git.cli_plugin import (
     execute_git_branching_phases,
     execute_git_authoring_phases
 )
+from ..utils.text import slug
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -64,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
         if code != 0: return code
 
         # If creation succeeds, override targets to immediately scaffold the new project
-        from ..utils.text import slug
+        # (Removed the rogue local import here!)
         targets = [(args.create, slug(args.create), args.create, {})]
         args.update = True
         is_create_run = True
@@ -75,11 +77,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"   Check your spelling or ensure your templates/resources/aliases.yaml is defined correctly.")
         return 1
 
+    # ── THE NEW DIFF SHORT-CIRCUIT ──
+    if getattr(args, 'diff', False):
+        print("\n\033[1m=== Fleet Git Diffs ===\033[0m")
+        from ..git.orchestrator import GitFleetManager
+        orchestrator = GitFleetManager(workspace_dir, reader.effective_config)
+        diff_target = args.diff if isinstance(args.diff, str) else "AUTO"
+
+        diff_targets = targets if targets else [("Workspace Root", "root", None, {})]
+        for name, project_slug, raw_token, item in diff_targets:
+            dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
+            orchestrator.status_report(dest, name, raw_token, diff_target)
+        return 0
+
     exit_code = 0
 
     try:
         # Determine if we should bypass Jinja templating
-        skip_templates = not (args.update or args.assume_yes or args.show_diffs)
+        skip_templates = not (args.update or getattr(args, 'assume_yes', False) or getattr(args, 'show_diffs', False))
 
         # Implicitly force cloning (and pulling, if updating templates)
         args.clone = True
@@ -91,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = max(exit_code, transport_exit)
 
         # Phase 2: Git Branching
-        if args.update and getattr(args, 'start_feature', None) is None:
+        if getattr(args, 'update', False) and getattr(args, 'start_feature', None) is None:
             # Auto-branch to protect the integration tree during scaffolding updates
             args.start_feature = "chore/update-scaffolding"
             args.assume_yes = True

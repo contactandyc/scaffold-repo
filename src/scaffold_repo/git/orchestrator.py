@@ -208,18 +208,61 @@ class GitFleetManager:
     # 3. AUTHORING LAYER
     # ==========================================
 
-    def status_report(self, dest: Path, name: str, raw_token: str):
+    def status_report(self, dest: Path, name: str, raw_token: str, diff_target: str | None = None):
         display_label = raw_token if raw_token else name
-        if (dest / ".git").exists():
+        if not (dest / ".git").exists():
+            print(f"\n\033[90mREPO-MISSING:\033[0m {display_label} (Not cloned/No .git directory)")
+            return
+
+        res = subprocess.run(["git", "branch", "--show-current"], cwd=dest, capture_output=True, text=True)
+        current_branch = res.stdout.strip()
+
+        target_branch = None
+        if diff_target and diff_target != "AUTO" and diff_target is not True:
+            target_branch = diff_target
+        elif diff_target == "AUTO" or diff_target is True:
+            # Smart Parent Detection
+            res_all = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=dest, capture_output=True, text=True)
+            all_branches = [b.strip() for b in res_all.stdout.splitlines() if b.strip()]
+            dev_branches = sorted([b for b in all_branches if b.startswith("dev-")], reverse=True)
+
+            res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
+            default_branch = "main" if "main" in res_main.stdout else "master"
+
+            if current_branch == default_branch or current_branch.startswith("dev-"):
+                target_branch = default_branch
+            elif dev_branches:
+                min_distance = float('inf')
+                target_dev = dev_branches[0]
+                for cand in dev_branches:
+                    mb_res = subprocess.run(["git", "merge-base", current_branch, cand], cwd=dest, capture_output=True, text=True)
+                    if mb_res.returncode == 0:
+                        mb = mb_res.stdout.strip()
+                        dist_res = subprocess.run(["git", "rev-list", "--count", f"{mb}..{current_branch}"], cwd=dest, capture_output=True, text=True)
+                        if dist_res.returncode == 0:
+                            dist = int(dist_res.stdout.strip())
+                            if dist < min_distance:
+                                min_distance = dist
+                                target_dev = cand
+                target_branch = target_dev
+            else:
+                target_branch = default_branch
+
+        print(f"\n\033[1m=== Git Diff: {display_label} ===\033[0m")
+        if target_branch:
+            print(f"Comparing \033[96m{current_branch or 'Working Tree'}\033[0m against parent \033[93m{target_branch}\033[0m")
+            # Intent-to-add so new files show up in the diff
+            subprocess.run(["git", "add", "--intent-to-add", "."], cwd=dest, capture_output=True)
+            subprocess.run(["git", "--no-pager", "diff", target_branch], cwd=dest)
+        else:
             status = subprocess.run(["git", "status", "--porcelain"], cwd=dest, capture_output=True, text=True)
             if status.stdout.strip():
-                print(f"\n\033[93mREPO-CHANGED:\033[0m {display_label}")
+                print(f"\033[93mUncommitted changes on {current_branch}:\033[0m")
                 subprocess.run(["git", "add", "--intent-to-add", "."], cwd=dest, capture_output=True)
                 subprocess.run(["git", "--no-pager", "diff"], cwd=dest)
             else:
-                print(f"\033[92mREPO-UNCHANGED:\033[0m {display_label}")
-        else:
-            print(f"\033[90mREPO-MISSING:\033[0m {display_label} (Not cloned/No .git directory)")
+                print(f"\033[92mNo uncommitted changes on {current_branch}\033[0m")
+
 
     def start_feature(self, dest: Path, name: str, item: dict, feature_raw: str, assume_yes: bool = False) -> bool:
         if not (dest / ".git").exists():

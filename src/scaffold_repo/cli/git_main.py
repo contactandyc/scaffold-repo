@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     grp_ws = ap.add_argument_group("Workspace Options")
     grp_ws.add_argument("-C", "--cwd", type=Path, default=Path("."), help="Run as if started in <PATH>")
     grp_ws.add_argument("-y", "--assume-yes", action="store_true", help="Bypass prompts and confirmations")
-    grp_ws.add_argument("--diff", action="store_true", help="Print unpaginated Git diffs and fleet status")
+    grp_ws.add_argument("--diff", nargs="?", const="AUTO", metavar="BRANCH", help="Print Git diffs against the parent branch (or a specified branch)")
 
     # --- PLUGIN HOOK (Handles Transport, Branching & Authoring) ---
     add_git_arguments(ap)
@@ -46,18 +46,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n❌ Error: Could not resolve any valid projects from: {args.projects}")
         return 1
 
-    if not targets and not args.diff:
+    if not targets and not getattr(args, 'diff', False):
         print("🎯 No targets specified. Executing against the root repository.")
         targets = [("Root Repo", "root", None, {})]
 
     # 0. Status Phase (Early Exit)
-    if args.diff:
+    if getattr(args, 'diff', False):
         print("\n\033[1m=== Fleet Git Diffs & Status ===\033[0m")
         orchestrator = GitFleetManager(workspace_dir, reader.effective_config)
+        diff_target = args.diff if isinstance(args.diff, str) else "AUTO"
         if not targets: targets = [("Root Repo", "root", None, {})]
         for name, project_slug, raw_token, item in targets:
             dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
-            orchestrator.status_report(dest, name, raw_token)
+            orchestrator.status_report(dest, name, raw_token, diff_target)
         return 0
 
     # 1. Transport Phase

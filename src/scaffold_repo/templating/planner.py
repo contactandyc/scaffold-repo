@@ -345,31 +345,63 @@ class TemplatePlanner:
                 if app_scoped_key in self.cfg:
                     rctx = deep_merge(rctx, self.cfg[app_scoped_key])
 
+                # ── The Generic Variable Standardization ──
+                if ctx_name == "default" or not ctx_name:
+                    rctx.setdefault("subproject_name", f"{base.get('project_snake','project')}_{block_name}")
+                else:
+                    rctx.setdefault("subproject_name", f"{base.get('project_snake','project')}_{ctx_name}")
+
+                rctx.setdefault("subproject_stack", app_stack)
+                rctx.setdefault("subproject_stack_type", app_stack_type)
+                rctx.setdefault("subproject_block", block_name)
+
                 for rel, data, is_j2, origin in all_resources:
                     root_prefix = active_prefix if active_prefix and rel.startswith(active_prefix) else (base_prefix if base_prefix and rel.startswith(base_prefix) else (global_prefix if rel.startswith(global_prefix) else None))
                     if not root_prefix: continue
 
                     sub_rel = rel[len(root_prefix):]
-                    dest_rel = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
-                    target = self.repo / dest_rel
+
+                    # Compute standard relative destination path
+                    raw_dest = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
+                    dest_rel = posixpath.normpath(raw_dest).lstrip("./")
 
                     if is_j2:
-                        raw_tpl = data.decode("utf-8", errors="replace")
-                        try: new_bytes = env.from_string(raw_tpl).render(**rctx).encode("utf-8")
-                        except Exception as e: raise RuntimeError(f"Jinja render error in subproject resource '{rel}' → '{dest_rel}': {e}") from e
-                        tmpl_sha = sha256(raw_tpl.encode("utf-8"))
-                    else: new_bytes, tmpl_sha = data, sha256(data)
+                        text = data.decode("utf-8", errors="replace")
+                        meta, inline_template = _extract_annotation(text)
 
+                        # Respect on_init so we don't recreate ghost files on updates!
+                        if (meta or {}).get("on_init") and not self.is_init:
+                            continue
+
+                        # Respect custom dest overrides in frontmatter
+                        if (meta or {}).get("dest"):
+                            override_dest = (meta or {}).get("dest")
+                            dest_rel = posixpath.normpath(f"{dest_dir}/{override_dest}").lstrip("./")
+
+                        updatable = bool((meta or {}).get("updatable", True))
+                        header_managed_meta = (meta or {}).get("header_managed")
+
+                        try: new_bytes = env.from_string(inline_template).render(**rctx).encode("utf-8")
+                        except Exception as e: raise RuntimeError(f"Jinja render error in subproject resource '{rel}' → '{dest_rel}': {e}") from e
+
+                        tmpl_sha = sha256(inline_template.encode("utf-8"))
+                        hm = _header_managed_default(dest_rel) if header_managed_meta is None else bool(header_managed_meta)
+                        is_exec = bool((meta or {}).get("executable", False))
+                    else:
+                        updatable = True
+                        new_bytes, tmpl_sha = data, sha256(data)
+                        hm = _header_managed_default(dest_rel)
+                        is_exec = False
+
+                    if not is_exec and hasattr(origin, "exists") and origin.exists():
+                        import os
+                        is_exec = os.access(origin, os.X_OK)
+
+                    target = self.repo / dest_rel
                     old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
-                    hm = _header_managed_default(dest_rel)
                     cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
                     status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
                     diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
 
-                    is_exec = False
-                    if hasattr(origin, "exists") and origin.exists():
-                        import os
-                        is_exec = os.access(origin, os.X_OK)
-
-                    plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, True, diff_text, new_bytes, tmpl_sha, f"{block_name}.{ctx_name}", hm, is_exec))
+                    plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, updatable, diff_text, new_bytes, tmpl_sha, f"{block_name}.{ctx_name}", hm, is_exec))
         return plan
