@@ -66,7 +66,6 @@ def main(argv: list[str] | None = None) -> int:
         if code != 0: return code
 
         # If creation succeeds, override targets to immediately scaffold the new project
-        # (Removed the rogue local import here!)
         targets = [(args.create, slug(args.create), args.create, {})]
         args.update = True
         is_create_run = True
@@ -77,7 +76,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"   Check your spelling or ensure your templates/resources/aliases.yaml is defined correctly.")
         return 1
 
-    # ── THE NEW DIFF SHORT-CIRCUIT ──
     if getattr(args, 'diff', False):
         print("\n\033[1m=== Fleet Git Diffs ===\033[0m")
         from ..git.orchestrator import GitFleetManager
@@ -94,28 +92,71 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         # Determine if we should bypass Jinja templating
-        skip_templates = not (args.update or getattr(args, 'assume_yes', False) or getattr(args, 'show_diffs', False))
+        is_dry_run_cli = getattr(args, 'dry_run', False)
+        skip_templates = not (args.update or getattr(args, 'assume_yes', False) or getattr(args, 'show_diffs', False) or is_dry_run_cli)
 
-        # Implicitly force cloning (and pulling, if updating templates)
         args.clone = True
         if not skip_templates:
             args.pull = True
 
         # Phase 1: Git Transport
-        transport_exit = execute_git_transport_phases(args, root, workspace_dir, reader, targets)
-        exit_code = max(exit_code, transport_exit)
+        if not is_create_run:
+            transport_exit = execute_git_transport_phases(args, root, workspace_dir, reader, targets)
+            exit_code = max(exit_code, transport_exit)
+
+        # ── PHASE 1.5: THE IDEMPOTENCY CHECK ──
+        if (getattr(args, 'update', False) or is_dry_run_cli) and not is_create_run:
+            print("\n🔍 Checking for platform drift and local configuration changes...")
+
+            drifting_targets = []
+            for t in targets:
+                name, project_slug, raw_token, item = t
+                dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
+
+                # Check for template drift
+                _, has_drift = run_sync(args, root, workspace_dir, [t], is_create_run, dry_run=True, quiet=True)
+
+                # Check for local scaffold.yaml modifications
+                local_config_changed = False
+                manifest_path = dest / "scaffold.yaml"
+                if manifest_path.exists() and (dest / ".git").exists():
+                    status = subprocess.run(
+                        ["git", "status", "--porcelain", "scaffold.yaml"],
+                        cwd=dest, capture_output=True, text=True
+                    )
+                    if status.stdout.strip():
+                        local_config_changed = True
+                        if not getattr(args, 'quiet', False):
+                            print(f"  - Detected local uncommitted changes to {name}/scaffold.yaml")
+
+                if has_drift or local_config_changed or getattr(args, 'force', False):
+                    drifting_targets.append(t)
+
+            if not drifting_targets:
+                print("\n✅ All projects are completely up-to-date. Skipping update.")
+                return 0 # Perfect exit!
+
+            if is_dry_run_cli:
+                # Run loud on the filtered targets
+                run_sync(args, root, workspace_dir, drifting_targets, is_create_run, dry_run=True, quiet=False)
+                print("\n👻 Dry run complete. The templates and licenses above would be modified.")
+                return 0 # Stop before branching!
+
+            # OVERWRITE TARGETS: Only proceed with repos that actually need updates!
+            targets = drifting_targets
 
         # Phase 2: Git Branching
-        if getattr(args, 'update', False) and getattr(args, 'start_feature', None) is None:
-            # Auto-branch to protect the integration tree during scaffolding updates
-            args.start_feature = "chore/update-scaffolding"
-            args.assume_yes = True
+        if not is_create_run:
+            if getattr(args, 'update', False) and getattr(args, 'start_feature', None) is None:
+                args.start_feature = "chore/update-scaffolding"
+                args.assume_yes = True
 
-        branching_exit = execute_git_branching_phases(args, root, workspace_dir, reader, targets)
-        exit_code = max(exit_code, branching_exit)
+            branching_exit = execute_git_branching_phases(args, root, workspace_dir, reader, targets)
+            exit_code = max(exit_code, branching_exit)
 
-        # Phase 3: Scaffolding (Verify/Update Repos & Licenses)
-        sync_exit = run_sync(args, root, workspace_dir, targets, is_create_run)
+        # Phase 3: Scaffolding (The Actual Write)
+        # We run it quietly because Phase 1.5 already printed the summary!
+        sync_exit, _ = run_sync(args, root, workspace_dir, targets, is_create_run, dry_run=False, quiet=not is_create_run)
         exit_code = max(exit_code, sync_exit)
 
         # Phase 4 & 5: Build Orchestration
@@ -123,8 +164,9 @@ def main(argv: list[str] | None = None) -> int:
         exit_code = max(exit_code, build_exit)
 
         # Phase 6: Git Authoring (Commit/Merge/Publish)
-        authoring_exit = execute_git_authoring_phases(args, root, workspace_dir, reader, targets)
-        exit_code = max(exit_code, authoring_exit)
+        if not is_create_run:
+            authoring_exit = execute_git_authoring_phases(args, root, workspace_dir, reader, targets)
+            exit_code = max(exit_code, authoring_exit)
 
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Command Failed (exit code {e.returncode})", file=sys.stderr)

@@ -30,7 +30,8 @@ def run_build(
 
     # Phase 4: Build Dependencies
     if getattr(args, 'build_deps', False) or getattr(args, 'clean_deps', False):
-        target_dirs = [workspace_dir / slug(posixpath.basename(t[2])) for t in targets] if targets else [root]
+        # ── SAFE PATH RESOLUTION ──
+        target_dirs = [(root if not t[2] else workspace_dir / slug(posixpath.basename(t[2]))) for t in targets] if targets else [root]
         for t_dir in target_dirs:
             if t_dir.exists():
                 build_all_libs(
@@ -47,7 +48,8 @@ def run_build(
         print("\n\033[1m=== Phase 5: First-Party Build Orchestration ===\033[0m")
 
         for name, project_slug, raw_token, item in targets:
-            dest = workspace_dir / slug(posixpath.basename(raw_token))
+            # ── SAFE PATH RESOLUTION ──
+            dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
             if not dest.exists():
                 continue
 

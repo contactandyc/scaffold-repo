@@ -27,7 +27,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n❌ Error: Could not resolve any valid projects from: {args.projects}")
         return 1
 
-    return run_sync(args, root, workspace_dir, targets, is_create_run=False)
+    # Unpack the tuple to get the exit code
+    exit_code, _has_drift = run_sync(args, root, workspace_dir, targets, is_create_run=False, dry_run=getattr(args, 'dry_run', False))
+    return exit_code
 
 if __name__ == "__main__":
     sys.exit(main())

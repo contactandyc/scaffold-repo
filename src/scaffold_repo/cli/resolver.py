@@ -93,6 +93,8 @@ def load_workspace_and_targets(cwd: Path, project_tokens: list[str]) -> tuple[Pa
     reader.load()
     reader.effective_config["workspace_dir"] = str(workspace_dir)
 
+    original_tokens = list(project_tokens)
+
     if not project_tokens:
         active_proj = _get_active_git_project(cwd)
         if active_proj:
@@ -121,4 +123,15 @@ def load_workspace_and_targets(cwd: Path, project_tokens: list[str]) -> tuple[Pa
             expanded_tokens.append(p)
 
     targets = resolve_projects(reader, expanded_tokens) if expanded_tokens else []
+
+    # ── THE IN-PLACE FALLBACK FIX ──
+    # If we are running with NO explicit projects (in-place), and the registry
+    # failed to resolve the auto-detected folder name, we inject a root target.
+    # Setting raw_token to `None` signals to the orchestrator to operate on `root`.
+    if not targets and not original_tokens:
+        active_proj = _get_active_git_project(cwd)
+        name = reader.cfg.get("project_name") or active_proj or "Workspace Root"
+        proj_slug = reader.cfg.get("project_slug") or slug(active_proj or "root")
+        targets = [(name, proj_slug, None, {"url": None})]
+
     return workspace_dir, reader, targets

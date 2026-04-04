@@ -274,6 +274,8 @@ class ConfigReader:
                     if isinstance(meta, dict):
                         meta = meta.get("scaffold-repo", meta.get("scaffold_repo", meta))
                         if isinstance(meta, dict):
+                            if meta.get("on_init") and not self.is_init:
+                                continue
                             dest = meta.get("dest", "")
                 except Exception: pass
 
@@ -300,19 +302,35 @@ class ConfigReader:
         discovered_files = []
         search_base = self.repo / dest_dir / targets_dir if targets_dir else self.repo / dest_dir
 
-        if search_base.exists():
-            for pattern in source_globs:
-                for p in search_base.rglob(pattern.replace("**/", "")) if "**" in pattern else search_base.glob(pattern):
-                    if p.is_file():
-                        discovered_files.append(p.relative_to(self.repo / dest_dir).as_posix())
+        if not self.is_init:
+            # ── UPDATE MODE ──
+            if search_base.exists():
+                # State 1: Active Subproject. Scan the physical disk for the developer's files.
+                for pattern in source_globs:
+                    for p in search_base.rglob(pattern.replace("**/", "")) if "**" in pattern else search_base.glob(pattern):
+                        if p.is_file():
+                            discovered_files.append(p.relative_to(self.repo / dest_dir).as_posix())
+            else:
+                # State 2: Deleted Subproject. The user removed this directory.
+                # Respect the deletion and wipe it from the build system.
+                return {}
         else:
+            # ── INIT MODE ──
+            # State 3: Bootstrapping. The disk is empty. Predict what the templates will generate.
             predicted_files = self._predict_template_files(rule.get("resource"))
-            dest_prefix = dest_dir.as_posix()
+
+            try:
+                rel_dest_dir = dest_dir.relative_to(self.repo).as_posix()
+            except ValueError:
+                rel_dest_dir = dest_dir.as_posix()
+
+            dest_prefix = "." if rel_dest_dir == "" else rel_dest_dir
+
             for predicted_dest in predicted_files:
                 if dest_prefix == "." or predicted_dest.startswith(dest_prefix + "/"):
                     for pattern in source_globs:
-                        if fnmatch.fnmatch(Path(predicted_dest).name, pattern):
-                            rel_p = predicted_dest if dest_prefix == "." else predicted_dest[len(dest_prefix)+1:]
+                        rel_p = predicted_dest if dest_prefix == "." else predicted_dest[len(dest_prefix)+1:]
+                        if fnmatch.fnmatch(rel_p, pattern):
                             discovered_files.append(rel_p)
                             break
 
@@ -540,25 +558,47 @@ class ConfigReader:
         dp["libraries"] = [idx[s]["item"] for s in self._toposort_subset(idx, set(all_transitive))]
 
         apt_pkgs = []
-        for s in set(all_transitive):
+        # FIX 1: Sort the set before iterating!
+        for s in sorted(set(all_transitive)):
             item = idx[s]["item"]
             if str(item.get("kind")) == "system" and item.get("pkg"):
                 pkg = item["pkg"]
                 apt_pkgs.extend([str(x) for x in pkg if str(x).strip()] if isinstance(pkg, (list, tuple)) else [str(pkg)])
-        dp["apt_packages"] = dedupe([p for p in apt_pkgs if p and str(p).lower() not in ("none", "null")])
+
+        # FIX 2: Sort the final list
+        dp["apt_packages"] = sorted(dedupe([p for p in apt_pkgs if p and str(p).lower() not in ("none", "null")]))
 
         self.cfg["deps"] = dp
 
         self._normalize_subprojects(idx, proj_slug)
 
+        # Gather dev_packages from current repo
+        merged_dev_pkgs = dict(self.cfg.get("dev_packages") or {})
+
+        # Merge dev_packages from all transitive dependencies
+        # FIX 3: Sort the set before iterating!
+        for s in sorted(set(all_transitive)):
+            dep_dev = idx[s]["item"].get("dev_packages") or {}
+            if isinstance(dep_dev, dict):
+                for k, v in dep_dev.items():
+                    if k not in merged_dev_pkgs:
+                        merged_dev_pkgs[k] = v
+            elif isinstance(dep_dev, list):
+                for k in dep_dev:
+                    if k not in merged_dev_pkgs:
+                        merged_dev_pkgs[k] = True
+
+        # Process the merged packages
         dev_pkgs = []
-        for pkg, constraint in (self.cfg.get("dev_packages") or {}).items() if isinstance(self.cfg.get("dev_packages"), dict) else {p: True for p in coerce_list(self.cfg.get("dev_packages"))}.items():
+        for pkg, constraint in merged_dev_pkgs.items():
             if constraint is False or constraint is None: continue
             elif constraint is True: dev_pkgs.append(str(pkg))
             else: dev_pkgs.append(f"{pkg}{str(constraint).strip()}" if str(constraint).strip() and str(constraint).strip()[0] in "=<>~" else f"{pkg}={str(constraint).strip()}")
+
         if dev_pkgs:
             dp = dict(self.cfg.get("deps") or {})
-            dp["apt_dev_packages"] = dedupe([p for p in dev_pkgs if p.strip()])
+            # FIX 4: Sort the final list
+            dp["apt_dev_packages"] = sorted(dedupe([p for p in dev_pkgs if p.strip()]))
             self.cfg["deps"] = dp
 
         dp = dict(self.cfg.get("deps") or {})
@@ -697,8 +737,14 @@ class ConfigReader:
                         f"rm -rf {dep_name}"
                     ]
 
+                # --- THE FIX: We explicitly default the branch to 'main' here ---
                 idx[s] = {
-                    "item": {"name": dep_name, "build_steps": build_steps, "kind": "git", "pkg": None},
+                    "item": {"name": dep_name,
+                             "build_steps": build_steps,
+                             "url": url_str,
+                             "kind": "git",
+                             "pkg": None,
+                             "branch": None},
                     "name": dep_name, "slug": s, "snake": target_snake,
                     "raw_key": dep_name, "finds": [f"{target_snake} CONFIG REQUIRED"],
                     "pkg_configs": [], "links": [f"{target_snake}::{target_snake}"],
@@ -710,8 +756,32 @@ class ConfigReader:
                 if dep_manifest.exists():
                     try:
                         dep_data = yaml.safe_load(dep_manifest.read_text(encoding="utf-8")) or {}
-                        idx[s]["depends_raw"] = list(coerce_list(dep_data.get("depends_on", [])))
+                        dep_deps = list(coerce_list(dep_data.get("depends_on", [])))
+
+                        # Deep scan subprojects (tests, apps, examples, main) for dependencies
+                        for block_name in ["tests", "apps", "examples", "main"]:
+                            block_data = dep_data.get(block_name)
+                            if not isinstance(block_data, dict): continue
+
+                            dep_deps.extend(coerce_list(block_data.get("depends_on", [])))
+                            dep_deps.extend(coerce_list(block_data.get("context", {}).get("depends_on", [])))
+
+                            # If the block defines standard keys directly, it's flat. Otherwise it's grouped.
+                            is_flat = any(k in block_data for k in ["targets", "find_packages", "link_libraries", "include_dirs", "sources"])
+                            items_to_process = {"_": block_data} if is_flat else block_data
+
+                            for k, v in items_to_process.items():
+                                if k in ("context", "depends_on"): continue
+                                if isinstance(v, dict):
+                                    dep_deps.extend(coerce_list(v.get("depends_on", [])))
+                                    for tgt in coerce_list(v.get("targets", [])):
+                                        if isinstance(tgt, dict):
+                                            dep_deps.extend(coerce_list(tgt.get("depends_on", [])))
+
+                        idx[s]["depends_raw"] = dedupe(dep_deps)
+                        idx[s]["item"]["dev_packages"] = dep_data.get("dev_packages", {})
                     except Exception: pass
+
             return s if s in idx else by_snake.get(snake(dep_name))
 
         for d in dedupe(all_explicit_deps): _synthesize(d)

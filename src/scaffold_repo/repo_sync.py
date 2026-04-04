@@ -20,15 +20,19 @@ def verify_repo(
         base_templates_dir: str | None = None,
         assume_yes: bool = False,
         show_diffs: bool = False,
-        is_init: bool = False
-) -> tuple[int, dict[str, Any]]:
-    rc_apply = apply_repo(
+        is_init: bool = False,
+        dry_run: bool = False,
+        quiet: bool = False
+) -> tuple[int, dict[str, Any], bool]:
+    rc_apply, apply_changed = apply_repo(
         repo,
         project_name=project_name,
         base_templates_dir=base_templates_dir,
         assume_yes=assume_yes,
         show_diffs=show_diffs,
-        is_init=is_init
+        is_init=is_init,
+        dry_run=dry_run,
+        quiet=quiet
     )
 
     reader = ConfigReader(repo, project_name=project_name, base_templates_dir=base_templates_dir, is_init=is_init)
@@ -40,11 +44,15 @@ def verify_repo(
         cfg=reader.effective_config,
         resource_reader=reader.tmpl_src.read_resource_text,
         include_exts=include_exts,
-        apply_fixes=fix_licenses,
-        no_prompt=no_prompt,
+        apply_fixes=(fix_licenses and not dry_run),
+        no_prompt=(no_prompt or dry_run),
     )
-    exit_code = rc_apply if rc_apply != 0 else (1 if res.get("issues") else 0)
-    return exit_code, res
+
+    lic_issues = len(res.get("issues", [])) > 0
+    has_drift = apply_changed or lic_issues
+    exit_code = rc_apply if rc_apply != 0 else (1 if lic_issues and not dry_run else 0)
+
+    return exit_code, res, has_drift
 
 def apply_repo(
         repo: Path,
@@ -53,16 +61,18 @@ def apply_repo(
         base_templates_dir: str | None = None,
         assume_yes: bool = False,
         show_diffs: bool = False,
-        is_init: bool = False
-) -> int:
+        is_init: bool = False,
+        dry_run: bool = False,
+        quiet: bool = False
+) -> tuple[int, bool]:
     repo = Path(repo).resolve()
 
     reader = ConfigReader(repo, project_name=project_name, base_templates_dir=base_templates_dir, is_init=is_init)
     try:
         reader.load()
     except Exception as e:
-        print(f"\n❌ Config/template load failed:\n{e}", file=sys.stderr)
-        return 3
+        if not quiet: print(f"\n❌ Config/template load failed:\n{e}", file=sys.stderr)
+        return 3, False
 
     planner = reader.get_planner()
     jinja_plan = planner.plan_jinja(show_diffs=show_diffs)
@@ -70,19 +80,20 @@ def apply_repo(
 
     state: dict[str, Any] = {}
     early = [i for i in (jinja_plan + copy_plan) if i.path == ".gitignore" and i.status in ("create", "update")]
-    if early:
-        print("\nApplying .gitignore early …")
+    if early and not dry_run:
+        if not quiet: print("\nApplying .gitignore early …")
         _apply_items(repo, early, state)
         jinja_plan = [i for i in jinja_plan if i not in early]
         copy_plan  = [i for i in copy_plan  if i not in early]
 
-    _print_summary("Jinja templates (*.j2 → rendered)", jinja_plan)
-    _print_summary("Non-Jinja files (verbatim copy)", copy_plan)
+    if not quiet:
+        _print_summary("Jinja templates (*.j2 → rendered)", jinja_plan)
+        _print_summary("Non-Jinja files (verbatim copy)", copy_plan)
 
     jinja_to_apply = [i for i in jinja_plan if i.status in ("create", "update") and (i.status == "create" or i.updatable)]
     j_updates = [i for i in jinja_to_apply if i.status == "update"]
 
-    if j_updates:
+    if j_updates and not quiet:
         print("\nJinja updates (batched):")
         for it in j_updates:
             print(f"  • {it.path}")
@@ -91,43 +102,36 @@ def apply_repo(
                 if it.diff:
                     print(f"\n--- diff: {it.path} ---")
                     print(it.diff.rstrip())
-        if not assume_yes:
-            ans = input("Apply Jinja updates? [y/N] ").strip().lower()
-            if ans not in ("y", "yes"):
-                jinja_to_apply = [i for i in jinja_to_apply if i.status == "create"]
+
+    if not assume_yes and not dry_run and j_updates:
+        ans = input("Apply Jinja updates? [y/N] ").strip().lower()
+        if ans not in ("y", "yes"):
+            jinja_to_apply = [i for i in jinja_to_apply if i.status == "create"]
 
     copy_to_apply: list[Any] = []
     for it in copy_plan:
         if it.status == "create":
             copy_to_apply.append(it)
         elif it.status == "update":
-            print(f"\nNon-Jinja update: {it.path}")
-            if it.diff and show_diffs:
+            if not quiet: print(f"\nNon-Jinja update: {it.path}")
+            if it.diff and show_diffs and not quiet:
                 print(it.diff.rstrip())
-            if assume_yes:
+            if assume_yes or dry_run:
                 copy_to_apply.append(it)
             else:
-                if it.diff and not show_diffs:
+                if it.diff and not show_diffs and not quiet:
                     print(it.diff.rstrip())
                 ans = input("Apply this update? [y/N] ").strip().lower()
                 if ans in ("y", "yes"):
                     copy_to_apply.append(it)
 
-    _apply_items(repo, jinja_to_apply, state)
-    _apply_items(repo, copy_to_apply, state)
-
     changed = bool(jinja_to_apply or copy_to_apply)
 
-    if changed:
-        validate_licenses(
-            repo,
-            cfg=reader.effective_config,
-            resource_reader=reader.tmpl_src.read_resource_text,
-            apply_fixes=True,
-            no_prompt=True,
-        )
+    if not dry_run:
+        _apply_items(repo, jinja_to_apply, state)
+        _apply_items(repo, copy_to_apply, state)
 
-    return 0
+    return 0, changed
 
 def _apply_items(repo: Path, items, state: dict) -> None:
     for it in items:
@@ -148,11 +152,15 @@ def _apply_items(repo: Path, items, state: dict) -> None:
         }
 
 def _print_summary(label: str, plan) -> None:
-    by = {"create": [], "update": [], "unchanged": []}
+    by = {"create": [], "update": [], "ignored": [], "unchanged": []}
     for i in plan:
-        by[i.status].append(i.path)
+        if i.status == "update" and not getattr(i, 'updatable', True):
+            by["ignored"].append(i.path)
+        else:
+            by[i.status].append(i.path)
+
     total = len(plan)
     print(f"\n{label} (total {total})")
-    for k in ("create", "update", "unchanged"):
+    for k in ("create", "update", "ignored", "unchanged"):
         if by[k]:
             print(f"  {k:8} {len(by[k]):2}  " + ", ".join(by[k])[:120])

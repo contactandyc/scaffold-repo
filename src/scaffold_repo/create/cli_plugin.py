@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from datetime import date
 from pathlib import Path
+
+from jinja2 import Environment, FileSystemLoader, ChoiceLoader
 
 from ..core.config import ConfigReader
 from ..cli.ui import interactive_select
 from ..cli.workspace import append_stack_to_workspace
+from ..utils.text import snake, camel
 
 def add_create_arguments(parser: argparse.ArgumentParser) -> None:
     """Appends repository creation arguments."""
@@ -17,11 +21,17 @@ def add_create_arguments(parser: argparse.ArgumentParser) -> None:
 
 def run_create(project_slug: str, workspace_dir: Path, reader: ConfigReader, existing_cfg: dict) -> int:
     """Interactive wizard to bootstrap a new repository and its scaffold.yaml manifest."""
-    from jinja2 import Environment
-    jenv = Environment()
+    loaders = [FileSystemLoader(str(reader.tmpl_src._pkg_root))] if reader.tmpl_src and reader.tmpl_src._pkg_root else []
+    jenv = Environment(
+        loader=ChoiceLoader(loaders) if loaders else None,
+        keep_trailing_newline=True,
+        trim_blocks=True,
+        lstrip_blocks=True
+    )
 
     print(f"\n\033[1m=== Creating New Project: {project_slug} ===\033[0m\n")
 
+    # 1. Discover Stacks
     stacks = set()
     for rel, _, _, _ in reader.tmpl_src.iter_files():
         if rel.startswith("stacks/"):
@@ -31,12 +41,13 @@ def run_create(project_slug: str, workspace_dir: Path, reader: ConfigReader, exi
     stacks = sorted(list(stacks))
 
     if not stacks:
-        print("❌ No stacks found in templates/stacks/.")
+        print("❌ No stacks found in templates/stacks/.", file=sys.stderr)
         return 1
 
     stack_idx = interactive_select("Select primary stack:", stacks)
     selected_stack = stacks[stack_idx]
 
+    # 2. Discover Stack Types
     types = set()
     for rel, _, _, _ in reader.tmpl_src.iter_files():
         if rel.startswith(f"stacks/{selected_stack}/"):
@@ -54,13 +65,16 @@ def run_create(project_slug: str, workspace_dir: Path, reader: ConfigReader, exi
             type_idx = interactive_select(f"Select {selected_stack} environment:", types)
             selected_type = types[type_idx]
 
+    # 3. Configure Workspace for the chosen stack
     ns_key = f"{selected_stack}_{selected_type}".lower()
     if ns_key not in existing_cfg:
         existing_cfg = append_stack_to_workspace(selected_stack, selected_type, workspace_dir, reader, existing_cfg)
 
+    # 4. Process Creation Prompts from Defaults
     answers = {}
     data = reader.tmpl_src.get_stacked_defaults(f"stacks/{selected_stack}/{selected_type}/_")
     create_prompts = data.get("create_prompts", [])
+
     for p in create_prompts:
         var_name = p.get("var")
         prompt_str = p.get("prompt", f"Set {var_name}:")
@@ -82,6 +96,7 @@ def run_create(project_slug: str, workspace_dir: Path, reader: ConfigReader, exi
         else:
             answers[var_name] = input(f"{prompt_str} [\033[92m{def_val}\033[0m]: ").strip() or def_val
 
+    # 5. Process Profile Selection
     profiles = set()
     for rel, _, _, _ in reader.tmpl_src.iter_files():
         if rel.startswith("profiles/") and rel.endswith(".yaml"):
@@ -100,6 +115,7 @@ def run_create(project_slug: str, workspace_dir: Path, reader: ConfigReader, exi
             prof_idx = interactive_select("Select project profile:", profiles, default_idx=start_idx)
             selected_profile = profiles[prof_idx]
 
+    # 6. Initialize the Target Directory
     project_dir = workspace_dir / project_slug
     if project_dir.exists() and (project_dir / "scaffold.yaml").exists():
         print(f"⚠️  Project {project_slug} already exists.")
@@ -109,75 +125,43 @@ def run_create(project_slug: str, workspace_dir: Path, reader: ConfigReader, exi
     scaffold_file = project_dir / "scaffold.yaml"
     subprocess.run(["git", "init"], cwd=project_dir, capture_output=True)
 
-    current_date = date.today().isoformat()
+    # 7. Render Template
+    ctx = {
+        "project_slug": project_slug,
+        "project_title": project_slug,
+        "project_snake": snake(project_slug),
+        "project_camel": camel(project_slug),
+        "stack": selected_stack,
+        "stack_type": selected_type,
+        "current_date": date.today().isoformat(),
+        "profile": selected_profile,
+        "registry_url": existing_cfg.get("template_registry_url", ""),
+        "registry_ref": existing_cfg.get("template_registry_ref", "main"),
+        "prompt_answers": answers
+    }
 
-    yaml_lines = [
-        f"project_title: {project_slug}",
-        f'version: "0.1.0"',
-        f'description: "A dynamically scaffolded {selected_stack}/{selected_type} project"',
-        f'stack: {selected_stack}/{selected_type}',
-        f'date_created: {current_date}'
-    ]
+    # Search for the template in the specific stack first, then fallback to base
+    template_text = reader.tmpl_src.read_resource_text(f"stacks/{selected_stack}/{selected_type}/scaffold.yaml.j2")
+    if not template_text:
+        template_text = reader.tmpl_src.read_resource_text("base/scaffold.yaml.j2")
 
-    if selected_profile:
-        yaml_lines.append(f'# profile: {selected_profile}')
+    if template_text:
+        try:
+            rendered = jenv.from_string(template_text).render(**ctx)
+            scaffold_file.write_text(rendered.rstrip() + "\n", encoding="utf-8")
+        except Exception as e:
+            print(f"❌ Failed to render scaffold.yaml template: {e}", file=sys.stderr)
+            return 1
+    else:
+        # Bare-minimum fallback if the registry is completely missing the template
+        print("⚠️  Warning: scaffold.yaml.j2 not found in templates. Using bare minimum.")
+        fallback_yaml = (
+            f"project_title: {project_slug}\n"
+            f"version: \"0.1.0\"\n"
+            f"stack: {selected_stack}/{selected_type}\n"
+        )
+        scaffold_file.write_text(fallback_yaml, encoding="utf-8")
 
-    yaml_lines.append("")
-
-    registry_url = existing_cfg.get("template_registry_url")
-    if registry_url:
-        yaml_lines.extend([
-            "# ── 1. Scaffolding Engine Source ──",
-            "# The absolute source of truth for your organizational templates.",
-            "base_templates:",
-            f"  repo: {registry_url}",
-            f"  ref: {existing_cfg.get('template_registry_ref', 'main')}",
-            ""
-        ])
-
-    yaml_lines.append("")
-
-    if answers:
-        yaml_lines.append("# ── Dynamic Setup Variables ──")
-        for k, v in answers.items():
-            val_str = f'"{v}"' if isinstance(v, str) and not v.isdigit() else v
-            yaml_lines.append(f"{k}: {val_str}")
-        yaml_lines.append("")
-
-    yaml_lines.extend([
-        "# ── 3. Licenses & Legal (Uncomment to apply) ──",
-        "# license_profile: apache-2.0",
-        "# license_overrides:",
-        "#   \"src/vendor/**\": mit",
-        "",
-        "# ── 4. Dependencies ──",
-        "depends_on: []",
-        "",
-        "# ── 5. Sources (Auto-Discovered) ──",
-        "# library_sources:",
-        "#   - src/main.c",
-        "",
-        "# ── 6. Tests (Auto-Discovered) ──",
-        "# tests:",
-        "#   targets:",
-        "#     - name: test_custom",
-        "#       sources: ",
-        "#         - tests/src/test_custom.c",
-        "",
-        "# ── 7. Apps & Examples (Optional) ──",
-        "# apps:",
-        "#   01_basic_example:",
-        "#     binaries:",
-        "#       basic_app:",
-        "#         - src/main.c",
-        "",
-        "# ── 8. Feature Flags & Overrides ──",
-        "# packages:",
-        "#   changie: true",
-        ""
-    ])
-
-    scaffold_file.write_text("\n".join(yaml_lines), encoding="utf-8")
     print(f"✅ Initialized {project_slug}/scaffold.yaml")
 
     return 0

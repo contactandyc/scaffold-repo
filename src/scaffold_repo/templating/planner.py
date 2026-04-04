@@ -255,7 +255,7 @@ class TemplatePlanner:
     def _discover_jinja_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if not is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+            if not is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml", "scaffold.yaml.j2"}: continue
             if self._is_resource_file(rel): continue
             if not self._is_valid_stack_rel(rel): continue
 
@@ -263,6 +263,9 @@ class TemplatePlanner:
             meta, inline_template = _extract_annotation(text)
 
             if (meta or {}).get("on_init") and not self.is_init:
+                continue
+
+            if meta and "dest" in meta and not meta["dest"]:
                 continue
 
             dest = (meta or {}).get("dest") or self._strip_package_prefix(rel)[:-3]
@@ -280,7 +283,7 @@ class TemplatePlanner:
     def _discover_copy_items(self) -> list[dict]:
         items = []
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml"}: continue
+            if is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml", "scaffold.yaml"}: continue
             if self._is_resource_file(rel): continue
             if not self._is_valid_stack_rel(rel): continue
 
@@ -373,9 +376,11 @@ class TemplatePlanner:
                         if (meta or {}).get("on_init") and not self.is_init:
                             continue
 
-                        # Respect custom dest overrides in frontmatter
-                        if (meta or {}).get("dest"):
-                            override_dest = (meta or {}).get("dest")
+                        # Respect custom dest overrides and null skips
+                        if meta and "dest" in meta:
+                            override_dest = meta["dest"]
+                            if not override_dest:
+                                continue
                             dest_rel = posixpath.normpath(f"{dest_dir}/{override_dest}").lstrip("./")
 
                         updatable = bool((meta or {}).get("updatable", True))
