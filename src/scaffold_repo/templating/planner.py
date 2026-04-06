@@ -151,6 +151,9 @@ class TemplatePlanner:
             except Exception:
                 rendered_dest = it["dest"]
 
+            if not rendered_dest or rendered_dest in (".", "/"):
+                continue
+
             target = self.repo / rendered_dest
             old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
             hm_meta = it.get("header_managed")
@@ -378,9 +381,14 @@ class TemplatePlanner:
 
                         # Respect custom dest overrides and null skips
                         if meta and "dest" in meta:
-                            override_dest = meta["dest"]
+                            try:
+                                override_dest = env.from_string(str(meta["dest"])).render(**rctx).strip()
+                            except Exception:
+                                override_dest = str(meta["dest"]).strip()
+
                             if not override_dest:
                                 continue
+
                             dest_rel = posixpath.normpath(f"{dest_dir}/{override_dest}").lstrip("./")
 
                         updatable = bool((meta or {}).get("updatable", True))
