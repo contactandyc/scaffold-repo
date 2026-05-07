@@ -10,7 +10,7 @@ from typing import Any
 
 from .workspace import find_scaffoldrc
 from ..core.config import ConfigReader
-from ..utils.text import slug, snake
+from ..utils.text import slug, snake, camel
 from ..utils.collections import deep_merge
 
 def _get_active_git_project(current_dir: Path) -> str | None:
@@ -84,7 +84,7 @@ def resolve_projects(reader: ConfigReader, projects: list[str]) -> list[tuple[st
 def load_workspace_and_targets(cwd: Path, project_tokens: list[str]) -> tuple[Path, ConfigReader, list[tuple[str, str, str, dict]]]:
     """Finds the workspace, resolves aliases, and returns the target configurations."""
     rc = find_scaffoldrc(cwd)
-    ws_str = rc.get("workspace_dir") or "../repos"
+    ws_str = rc.get("workspace_dir") or "repos"
     workspace_dir = Path(ws_str).expanduser()
     if not workspace_dir.is_absolute():
         workspace_dir = (cwd / workspace_dir).resolve()
@@ -95,8 +95,8 @@ def load_workspace_and_targets(cwd: Path, project_tokens: list[str]) -> tuple[Pa
 
     original_tokens = list(project_tokens)
 
+    active_proj = _get_active_git_project(cwd)
     if not project_tokens:
-        active_proj = _get_active_git_project(cwd)
         if active_proj:
             print(f"🎯 Auto-detected context: \033[96m{active_proj}\033[0m")
             project_tokens = [active_proj]
@@ -124,12 +124,22 @@ def load_workspace_and_targets(cwd: Path, project_tokens: list[str]) -> tuple[Pa
 
     targets = resolve_projects(reader, expanded_tokens) if expanded_tokens else []
 
+    # ── THE IN-PLACE ROOT PROJECT FIX ──
+    # If the resolved target is the exact repository we are currently standing in,
+    # force the raw_token to None. This guarantees the orchestration layer operates
+    # in-place instead of treating the root repo as a dependency and cloning it.
+    active_slug = slug(active_proj) if active_proj else slug(cwd.name)
+    final_targets = []
+    for n, s, r, i in targets:
+        if s == active_slug or (not original_tokens and len(targets) == 1):
+            final_targets.append((n, s, None, i))
+        else:
+            final_targets.append((n, s, r, i))
+    targets = final_targets
+
     # ── THE IN-PLACE FALLBACK FIX ──
-    # If we are running with NO explicit projects (in-place), and the registry
-    # failed to resolve the auto-detected folder name, we inject a root target.
-    # Setting raw_token to `None` signals to the orchestrator to operate on `root`.
+    # If we still have no targets, inject a generic root target
     if not targets and not original_tokens:
-        active_proj = _get_active_git_project(cwd)
         name = reader.cfg.get("project_name") or active_proj or "Workspace Root"
         proj_slug = reader.cfg.get("project_slug") or slug(active_proj or "root")
         targets = [(name, proj_slug, None, {"url": None})]

@@ -22,7 +22,7 @@ scaffold-init = "scaffold_repo.cli.init_main:main"
 scaffold-create = "scaffold_repo.cli.create_main:main"
 scaffold-sync = "scaffold_repo.cli.sync_main:main"
 scaffold-build = "scaffold_repo.cli.build_main:main"
-
+scaffold-bootstrap = "scaffold_repo.cli.bootstrap_main:main"
 
 [project.optional-dependencies]
 dev = [

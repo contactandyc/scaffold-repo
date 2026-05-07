@@ -1,10 +1,10 @@
 # src/scaffold_repo/templating/planner.py
 from __future__ import annotations
 
-import fnmatch
 import re
 import sys
 import posixpath
+import fnmatch
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +13,7 @@ import yaml
 from jinja2 import ChoiceLoader, Environment, FileSystemLoader, StrictUndefined
 
 from ..utils.text import sha256, slug, snake, camel
-from ..utils.collections import deep_merge
+from ..utils.collections import deep_merge, coerce_list
 
 _OSS_HEADER_EXTS = {
     ".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".java", ".js", ".ts",
@@ -135,8 +135,124 @@ class TemplatePlanner:
         self.tmpl_src = tmpl_src
         self.cfg = config
         self.is_init = is_init
-        self.package_patterns = config.get("package_patterns", {})
-        self.enabled_packages = config.get("enabled_packages", set())
+        self.enabled_features = config.get("enabled_features", set())
+
+    def _is_updatable(self, dest_rel_path: str) -> bool:
+        """
+        Checks the merged configuration for template_rules.
+        Returns False if the file matches a rule where updatable is false.
+        """
+        rules = self.cfg.get("template_rules", [])
+        if not isinstance(rules, list):
+            return True
+
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+
+            # Allow 'match' to be a single string or a list of strings
+            matches = rule.get("match", [])
+            if isinstance(matches, str):
+                matches = [matches]
+
+            for pattern in matches:
+                # Use fnmatch so "*.gitignore" or "README.md" both work
+                if fnmatch.fnmatch(dest_rel_path, pattern) or dest_rel_path == pattern:
+                    if rule.get("updatable") is False:
+                        return False
+
+        return True
+
+
+    # ── METADATA & RULE EVALUATION ──
+    def _collect_rules(self, rel: str, stack: str | None, stack_type: str | None) -> list[dict]:
+        """
+        Gathers rules based on a strict sandboxed inheritance model:
+        - global_rules: Apply to everything.
+        - feature_rules: Apply ONLY to templates originating from a feature folder.
+        - template_rules: Apply ONLY to templates originating from the base stack.
+        """
+        global_rules = []
+        template_rules = []
+        feature_rules = []
+
+        # 1. Determine the origin of this specific file
+        stripped = self._strip_stack_prefix(rel, stack, stack_type)
+        m = re.match(r"^scaffold-features/([^/]+)", stripped)
+        is_feature_file = bool(m)
+        current_feat_name = m.group(1) if is_feature_file else None
+
+        def _extract_rules(data: dict):
+            if not isinstance(data, dict): return
+
+            # Global rules always apply
+            global_rules.extend(coerce_list(data.get("global_rules", [])))
+
+            if is_feature_file:
+                # If it's a feature file, ONLY extract its specific feature rules
+                f_rules = data.get("feature_rules", {})
+                if isinstance(f_rules, dict) and current_feat_name in f_rules:
+                    feature_rules.extend(coerce_list(f_rules[current_feat_name]))
+            else:
+                # If it's a base file, ONLY extract template rules
+                template_rules.extend(coerce_list(data.get("template_rules", [])))
+
+        # 2. Physical Directory Chain (Root -> Stack -> Local)
+        dir_path = posixpath.dirname(rel)
+        parts = dir_path.split("/") if dir_path else []
+        current = ""
+        paths_to_check = [".scaffold.yaml"]
+        for p in parts:
+            if not p or p == ".": continue
+            current = f"{current}/{p}" if current else p
+            paths_to_check.append(f"{current}/.scaffold.yaml")
+
+        for pth in paths_to_check:
+            text = self.tmpl_src.read_resource_text(pth)
+            if text:
+                try:
+                    data = yaml.safe_load(text) or {}
+                    _extract_rules(data)
+                except Exception:
+                    pass
+
+        # 3. Logical Feature Defaults (Cross-Branch)
+        if is_feature_file and current_feat_name in self.enabled_features:
+            feat_defaults_path = f"scaffold-features/{current_feat_name}/.scaffold.yaml"
+            text = self.tmpl_src.read_resource_text(feat_defaults_path)
+            if text:
+                try:
+                    data = yaml.safe_load(text) or {}
+                    _extract_rules(data)
+                except Exception:
+                    pass
+
+        # 4. User Overrides (from the generated project's scaffold.yaml)
+        _extract_rules(self.cfg)
+
+        return global_rules + template_rules + feature_rules
+
+    def _evaluate_template_rules(self, logical_source: str, rules: list[dict]) -> dict:
+        """Evaluates collected rules against the logical source path.
+           Supports single strings or arrays of strings for 'match'.
+        """
+        merged_meta = {}
+        for rule in rules:
+            match_patterns = rule.get("match")
+            if not match_patterns: continue
+
+            # Normalize to a list to support array matching
+            if isinstance(match_patterns, str):
+                match_patterns = [match_patterns]
+
+            # If any pattern in the list matches, apply the rule metadata
+            if any(fnmatch.fnmatch(logical_source, pat) for pat in match_patterns):
+                for k, v in rule.items():
+                    if k != "match":
+                        merged_meta[k] = v
+        return merged_meta
+
+    # ── DISCOVERY AND PLANNING ──
 
     def plan_jinja(self, *, show_diffs: bool = False) -> list[PlanItem]:
         env = self._jinja_env_for_inline()
@@ -147,9 +263,9 @@ class TemplatePlanner:
             new_text = self._render_with_help(env, it, ctx)
 
             try:
-                rendered_dest = env.from_string(it["dest"]).render(**ctx)
+                rendered_dest = env.from_string(it["dest"]).render(**ctx).strip()
             except Exception:
-                rendered_dest = it["dest"]
+                rendered_dest = it["dest"].strip()
 
             if not rendered_dest or rendered_dest in (".", "/"):
                 continue
@@ -177,7 +293,7 @@ class TemplatePlanner:
             old_norm = _ensure_trailing_newline(target.read_text(encoding="utf-8", errors="replace") if target.exists() else "")
             status = "create" if not target.exists() else ("update" if old_norm != new_norm else "unchanged")
             diff_text = _diff(old_norm.encode("utf-8"), new_norm.encode("utf-8"), it["dest"]) if show_diffs and status in ("create", "update") else ""
-            plan.append(PlanItem("copy", it["dest"], status, True, diff_text, new_bytes, sha256(new_bytes), None, False, it.get("executable", False)))
+            plan.append(PlanItem("copy", it["dest"], status, it.get("updatable", True), diff_text, new_bytes, sha256(new_bytes), None, False, it.get("executable", False)))
         return plan
 
     def _jinja_env_for_inline(self) -> Environment:
@@ -199,6 +315,10 @@ class TemplatePlanner:
 
     def _build_ctx_inherited(self, key: str | None) -> dict:
         ctx = deep_merge(self._base_from_cfg(self.cfg), {} if not key or key == "." else (self.cfg.get(key) or {}))
+
+        if "prompt_answers" in self.cfg:
+            ctx = deep_merge(ctx, self.cfg["prompt_answers"])
+
         ctx.setdefault("project_name", self.cfg.get("project_name") or "project")
         ctx.setdefault("project_slug", slug(ctx.get("project_name", "project")))
         ctx.setdefault("project_snake", snake(ctx["project_slug"]))
@@ -224,82 +344,187 @@ class TemplatePlanner:
         return ctx
 
     def _base_from_cfg(self, cfg: dict) -> dict:
-        return {k: v for k, v in cfg.items() if k not in ("deps", "tests", "files", "template_packages", "packages", "templates_dir")}
+        return {k: v for k, v in cfg.items() if k not in ("deps", "tests", "files", "features", "packages", "templates_dir")}
 
-    def _strip_package_prefix(self, rel: str) -> str:
-        for pkg_name, pats in self.package_patterns.items():
-            if pkg_name == "resources": continue
-            for pat in pats:
-                if pat.endswith("/**"):
-                    prefix = pat[:-2]
-                    if rel.startswith(prefix): return rel[len(prefix):]
-        return rel
+    def _get_path_weight(self, rel: str, stack: str = None, stack_type: str = None) -> int:
+        stack = stack or self.cfg.get("stack")
+        stype = stack_type or self.cfg.get("stack_type")
 
-    def _matches_disabled(self, rel: str) -> bool:
-        matched = {pkg for pkg, pats in self.package_patterns.items() for pat in pats if fnmatch.fnmatch(rel, pat)}
-        return bool(matched) and not any(pkg in self.enabled_packages for pkg in matched)
+        weight = 1
 
-    def _is_valid_stack_rel(self, rel: str) -> bool:
-        if not rel.startswith("stacks/"): return True
-        stack = self.cfg.get("stack")
-        if not stack: return False
-        stack_type = self.cfg.get("stack_type")
-        if stack_type and rel.startswith(f"stacks/{stack}/{stack_type}/"): return True
-        if rel.startswith(f"stacks/{stack}/base/"): return True
-        return False
+        if stack and rel.startswith(f"stacks/{stack}/"):
+            weight = 3
+            if stype and rel.startswith(f"stacks/{stack}/{stype}/"):
+                weight = 5
+
+        if "/scaffold-features/" in rel or rel.startswith("scaffold-features/"):
+            weight += 1
+
+        return weight
+
+    def _strip_stack_prefix(self, rel: str, stack: str = None, stack_type: str = None) -> str:
+        s = rel
+        stack = stack or self.cfg.get("stack")
+        stype = stack_type or self.cfg.get("stack_type")
+
+        if stack and stype and s.startswith(f"stacks/{stack}/{stype}/base/"):
+            return s[len(f"stacks/{stack}/{stype}/base/"):]
+
+        if stack and stype and s.startswith(f"stacks/{stack}/{stype}/"):
+            return s[len(f"stacks/{stack}/{stype}/"):]
+
+        if stack and s.startswith(f"stacks/{stack}/base/"):
+            return s[len(f"stacks/{stack}/base/"):]
+
+        if stack and s.startswith(f"stacks/{stack}/"):
+            return s[len(f"stacks/{stack}/"):]
+
+        if s.startswith("base/"):
+            return s[len("base/"):]
+
+        return s
+
+    def _is_active_path(self, rel: str, stack: str = None, stack_type: str = None) -> bool:
+        if not rel.startswith(("base/", "stacks/", "scaffold-features/")):
+            return False
+
+        stack = stack or self.cfg.get("stack")
+        stack_type = stack_type or self.cfg.get("stack_type")
+
+        if rel.startswith("stacks/"):
+            if not stack: return False
+            valid_prefixes = [
+                f"stacks/{stack}/base/",
+            ]
+            if stack_type:
+                valid_prefixes.extend([
+                    f"stacks/{stack}/{stack_type}/base/",
+                    f"stacks/{stack}/{stack_type}/scaffold-features/",
+                    f"stacks/{stack}/{stack_type}/",
+                ])
+
+            if not any(rel.startswith(pfx) for pfx in valid_prefixes):
+                return False
+
+        s = self._strip_stack_prefix(rel, stack, stack_type)
+
+        if s.startswith("scaffold-features/"):
+            if "scaffold-features/" in s[len("scaffold-features/"): ]:
+                return False
+
+            match = re.match(r"^scaffold-features/([^/]+)", s)
+            if match and match.group(1) not in self.enabled_features:
+                return False
+
+        return True
+
+    def _strip_routing_prefixes(self, rel: str, stack: str = None, stack_type: str = None) -> str:
+        s = self._strip_stack_prefix(rel, stack, stack_type)
+        m = re.match(r"^scaffold-features/[^/]+/(.*)$", s)
+        if m:
+            s = m.group(1)
+        return s
 
     def _is_resource_file(self, rel: str) -> bool:
-        """Helper to ensure generic subproject templates aren't swept up by the main loop."""
-        resource_dirs = {rule.get("resource") for rule in self.cfg.get("subproject_rules", {}).values() if rule.get("resource")}
+        resource_dirs = {
+            rule.get("resource") for rule in self.cfg.get("subproject_rules", {}).values()
+            if isinstance(rule, dict) and rule.get("resource")
+        }
         for rd in resource_dirs:
-            if f"/{rd}/" in rel or rel.startswith(f"{rd}/"): return True
+            if f"/{rd}/" in rel or rel.startswith(f"{rd}/"):
+                return True
         return False
 
     def _discover_jinja_items(self) -> list[dict]:
-        items = []
+        items_dict = {}
+        stack = self.cfg.get("stack")
+        stack_type = self.cfg.get("stack_type")
+
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if not is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml", "scaffold.yaml.j2"}: continue
+            if not is_j2 or posixpath.basename(rel) in {".scaffold.yaml", "aliases.yaml", "scaffold.yaml.j2"}: continue
+            if not self._is_active_path(rel): continue
             if self._is_resource_file(rel): continue
-            if not self._is_valid_stack_rel(rel): continue
 
             text = data.decode("utf-8", errors="replace")
-            meta, inline_template = _extract_annotation(text)
+            inline_meta, inline_template = _extract_annotation(text)
 
-            if (meta or {}).get("on_init") and not self.is_init:
+            # Determine logical source for pattern matching
+            stripped = self._strip_routing_prefixes(rel, stack, stack_type)
+            logical_source = stripped[:-3] if (is_j2 and stripped.endswith('.j2')) else stripped
+
+            # ── EVALUATE LOGICAL INHERITANCE RULES ──
+            rules = self._collect_rules(rel, stack, stack_type)
+            rule_meta = self._evaluate_template_rules(logical_source, rules)
+
+            # Merge: Rule defaults < Inline overrides
+            final_meta = deep_merge(rule_meta, inline_meta or {})
+
+            if final_meta.get("on_init") and not self.is_init:
                 continue
 
-            if meta and "dest" in meta and not meta["dest"]:
+            # Evaluate final destination
+            dest = final_meta.get("dest", logical_source)
+            if not dest or (dest.startswith("tests/") and not self.is_init and not (self.cfg.get("tests") or {}).get("targets")):
                 continue
 
-            dest = (meta or {}).get("dest") or self._strip_package_prefix(rel)[:-3]
-
-            if dest.startswith("tests/") and not self.is_init and not (self.cfg.get("tests") or {}).get("targets"): continue
-
-            executable = bool((meta or {}).get("executable", False))
+            executable = bool(final_meta.get("executable", False))
             if not executable and hasattr(origin, "exists") and origin.exists():
                 import os
                 executable = os.access(origin, os.X_OK)
 
-            items.append({"rel": rel, "inline_template": inline_template, "dest": dest, "context": (meta or {}).get("context", "."), "updatable": bool((meta or {}).get("updatable", True)), "header_managed": (meta or {}).get("header_managed"), "origin": origin, "executable": executable})
-        return items
+            weight = self._get_path_weight(rel)
+
+            if dest not in items_dict or weight > items_dict[dest]["weight"]:
+                items_dict[dest] = {
+                    "rel": rel, "inline_template": inline_template, "dest": dest,
+                    "context": final_meta.get("context", "."),
+                    "updatable": bool(final_meta.get("updatable", True)),
+                    "header_managed": final_meta.get("header_managed"),
+                    "origin": origin, "executable": executable, "weight": weight
+                }
+
+        return list(items_dict.values())
 
     def _discover_copy_items(self) -> list[dict]:
-        items = []
+        items_dict = {}
+        stack = self.cfg.get("stack")
+        stack_type = self.cfg.get("stack_type")
+
         for rel, data, is_j2, origin in self.tmpl_src.iter_files():
-            if is_j2 or self._matches_disabled(rel) or posixpath.basename(rel) in {".scaffold-defaults.yaml", "aliases.yaml", "scaffold.yaml"}: continue
+            if is_j2 or posixpath.basename(rel) in {".scaffold.yaml", "aliases.yaml", "scaffold.yaml"}: continue
+            if not self._is_active_path(rel): continue
             if self._is_resource_file(rel): continue
-            if not self._is_valid_stack_rel(rel): continue
 
-            dest = self._strip_package_prefix(rel)
-            if dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets"): continue
+            # Determine logical source for pattern matching
+            logical_source = self._strip_routing_prefixes(rel, stack, stack_type)
 
-            executable = False
-            if hasattr(origin, "exists") and origin.exists():
+            # ── EVALUATE LOGICAL INHERITANCE RULES ──
+            rules = self._collect_rules(rel, stack, stack_type)
+            final_meta = self._evaluate_template_rules(logical_source, rules)
+
+            if final_meta.get("on_init") and not self.is_init:
+                continue
+
+            # Evaluate final destination
+            dest = final_meta.get("dest", logical_source)
+            if not dest or (dest.startswith("tests/") and not (self.cfg.get("tests") or {}).get("targets")):
+                continue
+
+            executable = bool(final_meta.get("executable", False))
+            if not executable and hasattr(origin, "exists") and origin.exists():
                 import os
                 executable = os.access(origin, os.X_OK)
 
-            items.append({"rel": rel, "dest": dest, "bytes": data, "origin": origin, "executable": executable})
-        return items
+            weight = self._get_path_weight(rel)
+
+            if dest not in items_dict or weight > items_dict[dest]["weight"]:
+                items_dict[dest] = {
+                    "rel": rel, "dest": dest, "bytes": data,
+                    "updatable": bool(final_meta.get("updatable", True)),
+                    "origin": origin, "executable": executable, "weight": weight
+                }
+
+        return list(items_dict.values())
 
     def _plan_subproject_resources(self, *, show_diffs: bool) -> list[PlanItem]:
         rules = self.cfg.get("subproject_rules", {})
@@ -314,9 +539,8 @@ class TemplatePlanner:
             resource_dir = rule.get("resource")
             if not resource_dir: continue
 
-            # Gather all templates mapped to this resource directory
-            all_resources = [(rel, data, is_j2, origin) for rel, data, is_j2, origin in self.tmpl_src.iter_files() if f"/{resource_dir}/" in rel or rel.startswith(f"{resource_dir}/")]
-            if not all_resources: continue
+            possible_resources = [(rel, data, is_j2, origin) for rel, data, is_j2, origin in self.tmpl_src.iter_files() if f"/{resource_dir}/" in rel or rel.startswith(f"{resource_dir}/")]
+            if not possible_resources: continue
 
             for ctx_name, ctx in block_data.items():
                 if ctx_name in ("context", "depends_on"): continue
@@ -339,10 +563,6 @@ class TemplatePlanner:
                 app_defaults = self.tmpl_src.get_stacked_defaults(f"stacks/{app_stack}/{app_stack_type}/_")
                 rctx = deep_merge(app_defaults, rctx)
 
-                active_prefix = f"stacks/{app_stack}/{app_stack_type}/{resource_dir}/" if app_stack else None
-                base_prefix = f"stacks/{app_stack}/base/{resource_dir}/" if app_stack else None
-                global_prefix = f"{resource_dir}/global/"
-
                 rctx.setdefault("project_name", self.cfg.get("project_name") or "project")
                 rctx.setdefault("project_slug", slug(rctx["project_name"]))
                 rctx.setdefault("project_snake", snake(rctx["project_slug"]))
@@ -351,7 +571,6 @@ class TemplatePlanner:
                 if app_scoped_key in self.cfg:
                     rctx = deep_merge(rctx, self.cfg[app_scoped_key])
 
-                # ── The Generic Variable Standardization ──
                 if ctx_name == "default" or not ctx_name:
                     rctx.setdefault("subproject_name", f"{base.get('project_snake','project')}_{block_name}")
                 else:
@@ -361,60 +580,79 @@ class TemplatePlanner:
                 rctx.setdefault("subproject_stack_type", app_stack_type)
                 rctx.setdefault("subproject_block", block_name)
 
-                for rel, data, is_j2, origin in all_resources:
-                    root_prefix = active_prefix if active_prefix and rel.startswith(active_prefix) else (base_prefix if base_prefix and rel.startswith(base_prefix) else (global_prefix if rel.startswith(global_prefix) else None))
-                    if not root_prefix: continue
+                sub_plan_dict = {}
 
-                    sub_rel = rel[len(root_prefix):]
+                for rel, data, is_j2, origin in possible_resources:
+                    if not self._is_active_path(rel, stack=app_stack, stack_type=app_stack_type):
+                        continue
 
-                    # Compute standard relative destination path
-                    raw_dest = f"{dest_dir}/{sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel}"
+                    stripped = self._strip_routing_prefixes(rel, stack=app_stack, stack_type=app_stack_type)
+                    if not stripped.startswith(f"{resource_dir}/"):
+                        continue
+
+                    # Determine logical source for subprojects
+                    sub_rel = stripped[len(f"{resource_dir}/"):]
+                    logical_source = sub_rel[:-3] if (is_j2 and sub_rel.endswith('.j2')) else sub_rel
+
+                    # Compute raw destination early just in case no rules alter it
+                    raw_dest = f"{dest_dir}/{logical_source}"
                     dest_rel = posixpath.normpath(raw_dest).lstrip("./")
 
+                    inline_meta = {}
                     if is_j2:
                         text = data.decode("utf-8", errors="replace")
-                        meta, inline_template = _extract_annotation(text)
+                        inline_meta, inline_template = _extract_annotation(text)
 
-                        # Respect on_init so we don't recreate ghost files on updates!
-                        if (meta or {}).get("on_init") and not self.is_init:
+                    # ── EVALUATE LOGICAL INHERITANCE RULES ──
+                    template_rules = self._collect_rules(rel, app_stack, app_stack_type)
+                    rule_meta = self._evaluate_template_rules(logical_source, template_rules)
+
+                    final_meta = deep_merge(rule_meta, inline_meta or {})
+
+                    if final_meta.get("on_init") and not self.is_init:
+                        continue
+
+                    if "dest" in final_meta:
+                        try:
+                            override_dest = env.from_string(str(final_meta["dest"])).render(**rctx).strip()
+                        except Exception:
+                            override_dest = str(final_meta["dest"]).strip()
+
+                        if not override_dest:
                             continue
+                        dest_rel = posixpath.normpath(f"{dest_dir}/{override_dest}").lstrip("./")
 
-                        # Respect custom dest overrides and null skips
-                        if meta and "dest" in meta:
-                            try:
-                                override_dest = env.from_string(str(meta["dest"])).render(**rctx).strip()
-                            except Exception:
-                                override_dest = str(meta["dest"]).strip()
+                    updatable = bool(final_meta.get("updatable", True))
+                    header_managed_meta = final_meta.get("header_managed")
+                    is_exec = bool(final_meta.get("executable", False))
 
-                            if not override_dest:
-                                continue
-
-                            dest_rel = posixpath.normpath(f"{dest_dir}/{override_dest}").lstrip("./")
-
-                        updatable = bool((meta or {}).get("updatable", True))
-                        header_managed_meta = (meta or {}).get("header_managed")
-
+                    if is_j2:
                         try: new_bytes = env.from_string(inline_template).render(**rctx).encode("utf-8")
                         except Exception as e: raise RuntimeError(f"Jinja render error in subproject resource '{rel}' → '{dest_rel}': {e}") from e
-
                         tmpl_sha = sha256(inline_template.encode("utf-8"))
-                        hm = _header_managed_default(dest_rel) if header_managed_meta is None else bool(header_managed_meta)
-                        is_exec = bool((meta or {}).get("executable", False))
                     else:
-                        updatable = True
                         new_bytes, tmpl_sha = data, sha256(data)
-                        hm = _header_managed_default(dest_rel)
-                        is_exec = False
+
+                    hm = _header_managed_default(dest_rel) if header_managed_meta is None else bool(header_managed_meta)
 
                     if not is_exec and hasattr(origin, "exists") and origin.exists():
                         import os
                         is_exec = os.access(origin, os.X_OK)
 
-                    target = self.repo / dest_rel
-                    old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
-                    cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
-                    status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
-                    diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
+                    weight = self._get_path_weight(rel, stack=app_stack, stack_type=app_stack_type)
 
-                    plan.append(PlanItem("jinja" if is_j2 else "copy", dest_rel, status, updatable, diff_text, new_bytes, tmpl_sha, f"{block_name}.{ctx_name}", hm, is_exec))
+                    if dest_rel not in sub_plan_dict or weight > sub_plan_dict[dest_rel]["weight"]:
+                        target = self.repo / dest_rel
+                        old_text = target.read_text(encoding="utf-8", errors="replace") if target.exists() else ""
+                        cmp_new, cmp_old = _normalize_for_cmp(new_bytes.decode("utf-8", errors="replace"), target, hm), _normalize_for_cmp(old_text, target, hm)
+                        status = "create" if not target.exists() else ("update" if cmp_old != cmp_new else "unchanged")
+                        diff_text = _diff(old_text.encode("utf-8"), cmp_new.encode("utf-8"), dest_rel) if show_diffs and status in ("create", "update") else ""
+
+                        sub_plan_dict[dest_rel] = {
+                            "weight": weight,
+                            "item": PlanItem("jinja" if is_j2 else "copy", dest_rel, status, updatable, diff_text, new_bytes, tmpl_sha, f"{block_name}.{ctx_name}", hm, is_exec)
+                        }
+
+                plan.extend([v["item"] for v in sub_plan_dict.values()])
+
         return plan

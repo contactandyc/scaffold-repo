@@ -170,9 +170,15 @@ def validate_licenses(
         if override_prof_name and "spdx" not in ovr_prof:
             effective_prof.pop("spdx", None)
 
+        file_ctx = dict(ctx)
+        for pat, cp_list in (cfg.get("copyright_overrides") or {}).items():
+            if fnmatch.fnmatch(rel, pat):
+                file_ctx["copyrights"] = cp_list
+                break
+
         raw_spdx_eff = (effective_prof.get("spdx") or "").rstrip()
         try:
-            spdx_text_eff = jenv.from_string(raw_spdx_eff).render(**ctx).rstrip()
+            spdx_text_eff = jenv.from_string(raw_spdx_eff).render(**file_ctx).rstrip()
         except Exception as e:
             res["issues"].append({"type": "config_error", "file": rel, "message": f"SPDX Jinja render failed: {e}"})
             unchanged += 1
@@ -193,7 +199,7 @@ def validate_licenses(
             if not ep_raw:
                 continue
             try:
-                ep_spdx = jenv.from_string(ep_raw).render(**ctx).rstrip()
+                ep_spdx = jenv.from_string(ep_raw).render(**file_ctx).rstrip()
                 if ep_spdx:
                     spdx_extra_chunks.append(ep_spdx)
             except Exception as e:
@@ -300,6 +306,20 @@ def validate_licenses(
         seen_norms.add(norm)
         unique_notices.append(rendered.rstrip())
 
+    for raw_notice in (cfg.get("notices") or []):
+        if not raw_notice: continue
+        # Render the string just in case it contains Jinja variables like {{ year }}
+        try:
+            rendered_raw = jenv.from_string(str(raw_notice)).render(**ctx).rstrip()
+        except Exception:
+            rendered_raw = str(raw_notice).rstrip()
+
+        norm = re.sub(r"\s+", " ", rendered_raw)
+        if norm in seen_norms:
+            continue
+        seen_norms.add(norm)
+        unique_notices.append(rendered_raw)
+
     if unique_notices:
         new_notice = ("\n\n").join(unique_notices).rstrip() + "\n"
         nf = repo / notice_file
@@ -309,6 +329,33 @@ def validate_licenses(
                 nf.write_text(new_notice, encoding="utf-8")
             else:
                 res["issues"].append({"type": "notice_out_of_date", "file": notice_file})
+
+    tp_licenses = cfg.get("third_party_licenses", [])
+    if tp_licenses:
+        tp_text_chunks = []
+        for tp in tp_licenses:
+            spdx = tp["spdx"]
+            attr = tp.get("attribution") or tp["name"]
+
+            # Fetch the raw text using the SPDX identifier as the filename
+            text = resource_reader(f"resources/licenses/{spdx}.txt")
+            if not text:
+                res["issues"].append({"type": "missing_third_party_license_text", "file": f"resources/licenses/{spdx}.txt"})
+                text = f"License text for {spdx} not found in registry."
+
+            chunk = f"{'='*80}\n{attr}\n{'='*80}\n\n{text.strip()}\n"
+            tp_text_chunks.append(chunk)
+
+        if tp_text_chunks:
+            tp_out = "\n\n".join(tp_text_chunks) + "\n"
+            tp_file = repo / "THIRD-PARTY-LICENSES.txt"
+            old_tp = tp_file.read_text(encoding="utf-8", errors="ignore") if tp_file.exists() else ""
+
+            if old_tp != tp_out:
+                if apply_fixes:
+                    tp_file.write_text(tp_out, encoding="utf-8")
+                else:
+                    res["issues"].append({"type": "third_party_licenses_out_of_date", "file": "THIRD-PARTY-LICENSES.txt"})
 
     for prof in sorted(profiles_used):
         prof_cfg = licenses.get(prof, {}) or {}

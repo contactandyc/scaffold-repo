@@ -80,7 +80,7 @@ class TemplateSource:
         return dedupe(out)
 
     def get_stacked_defaults(self, rel_path: str) -> dict:
-        """Cascades .scaffold-defaults.yaml from the root down to the target directory."""
+        """Cascades .scaffold.yaml from the root down to the target directory."""
         if not hasattr(self, "_defaults_cache"):
             self._defaults_cache = {}
 
@@ -92,11 +92,11 @@ class TemplateSource:
         stacked = {}
         current = ""
 
-        paths_to_check = [".scaffold-defaults.yaml"]
+        paths_to_check = [".scaffold.yaml"]
         for p in parts:
             if not p or p == ".": continue
             current = f"{current}/{p}" if current else p
-            paths_to_check.append(f"{current}/.scaffold-defaults.yaml")
+            paths_to_check.append(f"{current}/.scaffold.yaml")
 
         for pth in paths_to_check:
             text = self.read_resource_text(pth)
@@ -194,7 +194,7 @@ class TemplateSource:
 
         if not pkg_data:
             actual_basename = posixpath.basename(rel_path)
-            if actual_basename != ".scaffold-defaults.yaml" and rel_path != ".scaffold-defaults.yaml":
+            if actual_basename != ".scaffold.yaml" and rel_path != ".scaffold.yaml":
                 print(f"Warning: Included file '{rel_path}' not found in templates.", file=sys.stderr)
 
         return pkg_data
@@ -217,7 +217,7 @@ class TemplateSource:
             yield rel, data, is_j2, origin
 
     def load_defaults_yaml(self) -> dict:
-        return self._load_logical_path(".scaffold-defaults.yaml")
+        return self._load_logical_path(".scaffold.yaml")
 
     def read_resource_text(self, rel_path: str) -> str | None:
         for rel, data, _is_j2, _origin in self.iter_files():

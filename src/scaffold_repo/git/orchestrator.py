@@ -277,7 +277,24 @@ class GitFleetManager:
                     if is_dirty: subprocess.run(["git", "stash", "pop"], cwd=dest, capture_output=True)
                     return False
 
-        # 3. Determine target version via Byte-Bounded context
+        # 3. Check if feature branch ALREADY EXISTS
+        check_feat = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{feature_name}"], cwd=dest)
+        feature_exists = (check_feat.returncode == 0)
+
+        # --- THE FIX: Stop early if the branch is already in progress ---
+        if feature_exists:
+            subprocess.run(["git", "checkout", feature_name], cwd=dest, capture_output=True)
+            print(f"  ✓ Resumed existing feature branch: {feature_name}")
+
+            if is_dirty:
+                print(f"  - Restoring local changes onto branch '{feature_name}'...")
+                subprocess.run(["git", "stash", "pop"], cwd=dest, capture_output=True)
+
+            return True
+
+        # --- 4. IT'S A NEW FEATURE BRANCH ---
+
+        # Determine target version via Byte-Bounded context
         res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
         default_branch = "main" if "main" in res_main.stdout else "master"
 
@@ -296,7 +313,7 @@ class GitFleetManager:
         next_version = self._calculate_context_bounded_version(dest, current_version, max_bytes=20000)
         dev_branch = f"dev-v{next_version}"
 
-        # 4. Setup Integration Branch (Auto-advance from main)
+        # 5. Setup Integration Branch (Auto-advance from main)
         subprocess.run(["git", "fetch", "origin", default_branch], cwd=dest, capture_output=True)
 
         check_dev = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{dev_branch}"], cwd=dest)
@@ -311,21 +328,16 @@ class GitFleetManager:
             subprocess.run(["git", "pull", "--rebase", "origin", dev_branch], cwd=dest, capture_output=True)
             subprocess.run(["git", "rebase", f"origin/{default_branch}"], cwd=dest, capture_output=True)
 
-        # 5. Checkout Feature Branch
-        check_feat = subprocess.run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{feature_name}"], cwd=dest)
-        if check_feat.returncode == 0:
-            subprocess.run(["git", "checkout", feature_name], cwd=dest, capture_output=True)
-            print(f"  ✓ Resumed existing feature branch: {feature_name}")
-        else:
-            subprocess.run(["git", "checkout", "-b", feature_name], cwd=dest, capture_output=True)
-            print(f"  ✓ Created new feature branch: {feature_name}")
+        # 6. Checkout Feature Branch
+        subprocess.run(["git", "checkout", "-b", feature_name], cwd=dest, capture_output=True)
+        print(f"  ✓ Created new feature branch: {feature_name}")
 
-        # 6. POP the stashed changes onto the newly created feature branch
+        # 7. POP the stashed changes onto the newly created feature branch
         if is_dirty:
             print(f"  - Restoring local changes onto branch '{feature_name}'...")
             subprocess.run(["git", "stash", "pop"], cwd=dest, capture_output=True)
 
-        # 7. Auto-bump version in scaffold.yaml
+        # 8. Auto-bump version in scaffold.yaml
         target_version = next_version
         if manifest_path.exists():
             lines = manifest_path.read_text(encoding="utf-8").splitlines()

@@ -20,10 +20,6 @@ from ..templating.planner import TemplatePlanner
 from ..cli.workspace import find_scaffoldrc
 
 def _extract_dep_name(raw_dep: Any) -> str:
-    """
-    Parses a dependency definition (which could be a URL, a git SSH string, a dictionary,
-    or a plain string) and extracts a clean, base name for the dependency.
-    """
     if isinstance(raw_dep, dict):
         if len(raw_dep) == 1:
             k = next(iter(raw_dep))
@@ -40,10 +36,6 @@ def _extract_dep_name(raw_dep: Any) -> str:
     return s
 
 class ConfigReader:
-    """
-    Responsible for discovering, loading, merging, and normalizing configuration files
-    (scaffold.yaml, registry files, included templates) for a project workspace.
-    """
     def __init__(self, repo: Path, *, project_name: str | None = None, base_templates_dir: str | None = None, is_init: bool = False):
         self.repo = repo.resolve()
         self.cfg: dict = {}
@@ -57,16 +49,14 @@ class ConfigReader:
             base_dir = base_dir.resolve()
 
         self.tmpl_src = TemplateSource(base_dir=base_dir, pkg_rel="templates")
-        self.enabled_packages: set[str] = set()
-        self.package_patterns: dict[str, list[str]] = {}
+        self.enabled_features: set[str] = set()
 
     @property
     def effective_config(self) -> dict:
         return self.cfg
 
     def get_planner(self) -> TemplatePlanner:
-        self.cfg["package_patterns"] = self.package_patterns
-        self.cfg["enabled_packages"] = self.enabled_packages
+        self.cfg["enabled_features"] = self.enabled_features
         return TemplatePlanner(self.repo, self.tmpl_src, self.cfg, self.is_init)
 
     def load(self) -> None:
@@ -109,6 +99,8 @@ class ConfigReader:
                 self.tmpl_src = TemplateSource(base_dir=new_base)
 
         self.cfg = self.tmpl_src.load_defaults_yaml() or {}
+
+        self.cfg = deep_merge(self.cfg, rc_cfg)
 
         if rc_cfg.get("workspace_dir"):
             self.cfg["workspace_dir"] = rc_cfg["workspace_dir"]
@@ -171,7 +163,13 @@ class ConfigReader:
             self.cfg = deep_merge(self.cfg, base)
             self.cfg = deep_merge(self.cfg, local_data)
 
-            raw_stack = str(self.cfg.get("stack") or "").strip()
+            # --- THE STACK UNWRAPPING FIX ---
+            raw_stack = self.cfg.get("stack")
+            if isinstance(raw_stack, list) and raw_stack:
+                raw_stack = str(raw_stack[0]).strip()
+            else:
+                raw_stack = str(raw_stack or "").strip()
+
             if raw_stack:
                 st = raw_stack.split("/")[0].lower()
                 st_type = raw_stack.split("/")[1].lower() if "/" in raw_stack else "base"
@@ -200,7 +198,7 @@ class ConfigReader:
         self._normalize_keys_autofill()
         self._expand_library_templates()
         self._augment_with_libraries_tests_apps()
-        self._compute_package_switches()
+        self._compute_feature_switches()
 
     def _render_contributors(self) -> None:
         contribs = self.cfg.get("contributors") or {}
@@ -303,20 +301,14 @@ class ConfigReader:
         search_base = self.repo / dest_dir / targets_dir if targets_dir else self.repo / dest_dir
 
         if not self.is_init:
-            # ── UPDATE MODE ──
             if search_base.exists():
-                # State 1: Active Subproject. Scan the physical disk for the developer's files.
                 for pattern in source_globs:
                     for p in search_base.rglob(pattern.replace("**/", "")) if "**" in pattern else search_base.glob(pattern):
                         if p.is_file():
                             discovered_files.append(p.relative_to(self.repo / dest_dir).as_posix())
             else:
-                # State 2: Deleted Subproject. The user removed this directory.
-                # Respect the deletion and wipe it from the build system.
                 return {}
         else:
-            # ── INIT MODE ──
-            # State 3: Bootstrapping. The disk is empty. Predict what the templates will generate.
             predicted_files = self._predict_template_files(rule.get("resource"))
 
             try:
@@ -348,7 +340,6 @@ class ConfigReader:
         rules = self.cfg.get("subproject_rules", {})
         reserved = {"depends_on", "context"}
 
-        # ── ZERO-CONFIG MAGIC ──
         for implicit_key in ["main", "tests"]:
             if implicit_key in rules and implicit_key not in self.cfg:
                 self.cfg[implicit_key] = {}
@@ -362,8 +353,6 @@ class ConfigReader:
 
             out = {}
 
-            # ── THE FIX: Flat vs Grouped Detection ──
-            # If the block has standard target keys at the root, it's flat!
             flat_keys = {"targets", "find_packages", "link_libraries", "include_dirs", "sources"}
             is_flat = any(k in block_data for k in flat_keys) or not any(k for k in block_data.keys() if k not in reserved)
 
@@ -372,7 +361,6 @@ class ConfigReader:
             for item_name, item_cfg in items_to_process.items():
                 if item_name in reserved: continue
 
-                # Safe fallback if they used shorthand at the group level too
                 if not isinstance(item_cfg, dict):
                     item_cfg = {"targets": item_cfg}
 
@@ -386,7 +374,6 @@ class ConfigReader:
                 is_auto_discovered = "targets" not in ctx
                 discovered = {}
 
-                # ── SHORTHAND ROUTING VARIABLES ──
                 targets_dir = rule.get("targets_dir", "")
                 default_ext = rule.get("default_ext", "c")
 
@@ -396,21 +383,16 @@ class ConfigReader:
                 else:
                     ctx["targets"] = self._normalize_build_targets(ctx["targets"], self.repo / ctx["_dest_dir"], targets_dir, default_ext)
 
-                # Ensure discovered targets don't overwrite the cleaner include_dirs from _auto_discover_targets
                 if is_auto_discovered and discovered:
                     for t in ctx["targets"]:
                         if t["name"] in discovered:
                             t["include_dirs"] = discovered[t["name"]].get("include_dirs", [])
 
-                # FIX 1: Grab global dependencies from the root of scaffold.yaml
                 global_deps = coerce_list(self.cfg.get("depends_on", []))
-
-                # Combine global + suite + specific item dependencies
                 union_deps = [str(x) for x in global_deps + coerce_list(suite_ctx.get("depends_on")) + coerce_list(ctx.get("depends_on"))]
                 for tgt in ctx["targets"]:
                     union_deps.extend(str(nm) for nm in tgt.get("depends_on", []))
 
-                # FIX 2: Ensure subprojects (tests, apps, examples) ALWAYS link to the main library!
                 if proj_slug and block_name != "main" and proj_slug not in union_deps:
                     union_deps.append(proj_slug)
 
@@ -419,7 +401,6 @@ class ConfigReader:
 
                 for s in lib_slugs:
                     if s not in idx: continue
-                    # Do not find_package ourselves if we are linking in-tree!
                     if s == proj_slug:
                         links.extend(idx[s].get("links", []))
                     else:
@@ -443,8 +424,20 @@ class ConfigReader:
                 for ctx in out.values():
                     self.cfg.setdefault("active_subprojects", []).append(ctx["_dest_dir"])
 
+        lib_srcs = []
+        for ctx in self.cfg.get("main", {}).values():
+            for tgt in ctx.get("targets", []):
+                lib_srcs.extend(tgt.get("sources", []))
+
+        self.cfg["library_sources"] = dedupe(lib_srcs)
+
     def _normalize_keys_autofill(self) -> None:
-        raw_stack = str(self.cfg.get("stack") or "").strip()
+        raw_stack = self.cfg.get("stack")
+        if isinstance(raw_stack, list) and raw_stack:
+            raw_stack = str(raw_stack[0]).strip()
+        else:
+            raw_stack = str(raw_stack or "").strip()
+
         if "/" in raw_stack:
             st, st_type = raw_stack.split("/", 1)
             self.cfg["stack"] = st.lower()
@@ -495,6 +488,24 @@ class ConfigReader:
             norm_cp["year_span"] = f"{cp_start}–{end_year}" if cp_start and cp_start != end_year else end_year
             norm_copyrights.append(norm_cp)
         self.cfg["copyrights"] = norm_copyrights
+
+        raw_cp_overrides = self.cfg.get("copyright_overrides", {})
+        norm_cp_overrides = {}
+        for pat, raw_cps in raw_cp_overrides.items():
+            norm_list = []
+            for raw_cp in (raw_cps if isinstance(raw_cps, list) else [raw_cps]):
+                norm_cp = _resolve_entity_ref(raw_cp)
+                if not norm_cp: continue
+                if "entity" not in norm_cp and "contact" in norm_cp: norm_cp["entity"] = norm_cp["contact"]
+                norm_cp["entity"] = _render_val(norm_cp.get("entity", ""))
+                norm_cp["full_entity"] = _render_val(norm_cp.get("full_entity", norm_cp.get("entity", "")))
+                cp_start = str(norm_cp.get("start_year") or default_start_year)
+                if cp_start < default_start_year: cp_start = default_start_year
+                end_year = str(norm_cp.get("end_year") or current_year)
+                norm_cp["year_span"] = f"{cp_start}–{end_year}" if cp_start and cp_start != end_year else end_year
+                norm_list.append(norm_cp)
+            norm_cp_overrides[pat] = norm_list
+        self.cfg["copyright_overrides"] = norm_cp_overrides
 
         raw_contacts = coerce_list(self.cfg.get("contacts", []))
         norm_contacts = []
@@ -558,46 +569,63 @@ class ConfigReader:
         dp["libraries"] = [idx[s]["item"] for s in self._toposort_subset(idx, set(all_transitive))]
 
         apt_pkgs = []
-        # FIX 1: Sort the set before iterating!
+        harvested_notices = coerce_list(self.cfg.get("notices", []))
+        harvested_tp_licenses = coerce_list(self.cfg.get("third_party_licenses", []))
+
+        for s in sorted(set(all_transitive)):
+            item = idx[s]["item"]
+
+            if str(item.get("kind")) == "system" and item.get("pkg"):
+                pkg = item["pkg"]
+                apt_pkgs.extend([str(x) for x in pkg if str(x).strip()] if isinstance(pkg, (list, tuple)) else [str(pkg)])
+
+            if item.get("notices"):
+                harvested_notices.extend(coerce_list(item["notices"]))
+
+            if item.get("license_spdx"):
+                if not any(x.get("name") == item.get("name") for x in harvested_tp_licenses):
+                    harvested_tp_licenses.append({
+                        "name": item.get("name", s),
+                        "spdx": item.get("license_spdx"),
+                        "attribution": item.get("attribution", "")
+                    })
+
+        self.cfg["notices"] = dedupe(harvested_notices)
+        self.cfg["third_party_licenses"] = harvested_tp_licenses
+
         for s in sorted(set(all_transitive)):
             item = idx[s]["item"]
             if str(item.get("kind")) == "system" and item.get("pkg"):
                 pkg = item["pkg"]
                 apt_pkgs.extend([str(x) for x in pkg if str(x).strip()] if isinstance(pkg, (list, tuple)) else [str(pkg)])
 
-        # FIX 2: Sort the final list
         dp["apt_packages"] = sorted(dedupe([p for p in apt_pkgs if p and str(p).lower() not in ("none", "null")]))
 
         self.cfg["deps"] = dp
 
         self._normalize_subprojects(idx, proj_slug)
 
-        # Gather dev_packages from current repo
-        merged_dev_pkgs = dict(self.cfg.get("dev_packages") or {})
+        merged_pkgs = dict(self.cfg.get("packages") or {})
 
-        # Merge dev_packages from all transitive dependencies
-        # FIX 3: Sort the set before iterating!
         for s in sorted(set(all_transitive)):
-            dep_dev = idx[s]["item"].get("dev_packages") or {}
-            if isinstance(dep_dev, dict):
-                for k, v in dep_dev.items():
-                    if k not in merged_dev_pkgs:
-                        merged_dev_pkgs[k] = v
-            elif isinstance(dep_dev, list):
-                for k in dep_dev:
-                    if k not in merged_dev_pkgs:
-                        merged_dev_pkgs[k] = True
+            dep_pkg = idx[s]["item"].get("packages") or {}
+            if isinstance(dep_pkg, dict):
+                for k, v in dep_pkg.items():
+                    if k not in merged_pkgs:
+                        merged_pkgs[k] = v
+            elif isinstance(dep_pkg, list):
+                for k in dep_pkg:
+                    if k not in merged_pkgs:
+                        merged_pkgs[k] = True
 
-        # Process the merged packages
         dev_pkgs = []
-        for pkg, constraint in merged_dev_pkgs.items():
+        for pkg, constraint in merged_pkgs.items():
             if constraint is False or constraint is None: continue
             elif constraint is True: dev_pkgs.append(str(pkg))
             else: dev_pkgs.append(f"{pkg}{str(constraint).strip()}" if str(constraint).strip() and str(constraint).strip()[0] in "=<>~" else f"{pkg}={str(constraint).strip()}")
 
         if dev_pkgs:
             dp = dict(self.cfg.get("deps") or {})
-            # FIX 4: Sort the final list
             dp["apt_dev_packages"] = sorted(dedupe([p for p in dev_pkgs if p.strip()]))
             self.cfg["deps"] = dp
 
@@ -694,7 +722,7 @@ class ConfigReader:
 
         by_snake = {v["snake"]: k for k, v in idx.items()}
 
-        ws_str = self.cfg.get("workspace_dir", "../repos")
+        ws_str = self.cfg.get("workspace_dir", "repos")
         workspace_dir = Path(ws_str).expanduser()
         if not workspace_dir.is_absolute():
             workspace_dir = (self.repo / workspace_dir).resolve()
@@ -737,7 +765,6 @@ class ConfigReader:
                         f"rm -rf {dep_name}"
                     ]
 
-                # --- THE FIX: We explicitly default the branch to 'main' here ---
                 idx[s] = {
                     "item": {"name": dep_name,
                              "build_steps": build_steps,
@@ -758,7 +785,6 @@ class ConfigReader:
                         dep_data = yaml.safe_load(dep_manifest.read_text(encoding="utf-8")) or {}
                         dep_deps = list(coerce_list(dep_data.get("depends_on", [])))
 
-                        # Deep scan subprojects (tests, apps, examples, main) for dependencies
                         for block_name in ["tests", "apps", "examples", "main"]:
                             block_data = dep_data.get(block_name)
                             if not isinstance(block_data, dict): continue
@@ -766,7 +792,6 @@ class ConfigReader:
                             dep_deps.extend(coerce_list(block_data.get("depends_on", [])))
                             dep_deps.extend(coerce_list(block_data.get("context", {}).get("depends_on", [])))
 
-                            # If the block defines standard keys directly, it's flat. Otherwise it's grouped.
                             is_flat = any(k in block_data for k in ["targets", "find_packages", "link_libraries", "include_dirs", "sources"])
                             items_to_process = {"_": block_data} if is_flat else block_data
 
@@ -779,7 +804,7 @@ class ConfigReader:
                                             dep_deps.extend(coerce_list(tgt.get("depends_on", [])))
 
                         idx[s]["depends_raw"] = dedupe(dep_deps)
-                        idx[s]["item"]["dev_packages"] = dep_data.get("dev_packages", {})
+                        idx[s]["item"]["packages"] = dep_data.get("packages", {})
                     except Exception: pass
 
             return s if s in idx else by_snake.get(snake(dep_name))
@@ -851,7 +876,6 @@ class ConfigReader:
         if not raw_items: return []
         b_dict = {}
 
-        # The Shorthand Magic Helper
         def _make_default_src(name: str) -> str:
             return f"{targets_dir}/{name}.{default_ext}" if targets_dir else f"{name}.{default_ext}"
 
@@ -913,6 +937,7 @@ class ConfigReader:
                 if f in conf: ent[f] = conf[f]
             norm.append(ent)
         return sorted(norm, key=lambda x: x["name"])
+
     def _resolve_dep_names_to_lib_slugs(self, dep_names: list[str], idx: dict) -> list[str]:
         by_snake = {v["snake"]: k for k, v in idx.items()}
         out = []
@@ -927,24 +952,16 @@ class ConfigReader:
     def _derive_suite_deps_from_libs(self, lib_slugs: list[str], idx: dict) -> tuple[list[str], list[str]]:
         return dedupe([fp for s in lib_slugs for fp in idx[s]["finds"]]), dedupe([lk for s in lib_slugs for lk in idx[s]["links"]])
 
-    def _compute_package_switches(self) -> None:
-        env = Environment(undefined=StrictUndefined)
-        def render_pat(p):
-            if "{{" in p:
-                try: return env.from_string(p).render(**self.cfg)
-                except Exception: return p
-            return p
+    def _compute_feature_switches(self) -> None:
+        enabled = set()
 
-        self.package_patterns = {name: [render_pat(str(x)) for x in coerce_list(pats)] for name, pats in (self.cfg.get("template_packages") or {}).items()}
-        raw_pkgs = self.cfg.get("packages") or {}
-        enabled, flavors = set(), {}
+        raw_feats = self.cfg.get("features") or {}
 
-        if isinstance(raw_pkgs, dict):
-            for pkg, val in raw_pkgs.items():
-                if val is False or val is None: continue
-                enabled.add(pkg)
-                if isinstance(val, str) and val.lower() != "true": flavors[pkg] = val
-        else: enabled = set(str(x) for x in coerce_list(raw_pkgs))
+        if isinstance(raw_feats, dict):
+            for f, val in raw_feats.items():
+                if str(val).lower() in ("true", "yes", "1", "on"):
+                    enabled.add(str(f).lower())
+        elif isinstance(raw_feats, list):
+            enabled.update(str(x).lower() for x in raw_feats)
 
-        self.enabled_packages = enabled
-        self.cfg["package_flavors"] = flavors
+        self.enabled_features = enabled

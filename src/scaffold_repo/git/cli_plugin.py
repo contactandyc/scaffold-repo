@@ -1,8 +1,10 @@
 # src/scaffold_repo/git/cli_plugin.py
 import argparse
 import subprocess
+import posixpath
 from pathlib import Path
 from .orchestrator import GitFleetManager
+from ..utils.text import slug
 
 def add_git_arguments(parser: argparse.ArgumentParser):
     """Adds Git-specific arguments to the main CLI parser."""
@@ -23,10 +25,7 @@ def add_git_arguments(parser: argparse.ArgumentParser):
 
     # Authoring Phase
     grp_git.add_argument("--commit", type=str, metavar="MSG", help="Commit changes")
-
-    # Updated help text to explicitly mention pushing
     grp_git.add_argument("--publish", action="store_true", help="Smart publish: resolves feature -> dev -> main and pushes to origin")
-
     grp_git.add_argument("--publish-feature", action="store_true", help="Merge feature to dev")
     grp_git.add_argument("--publish-release", action="store_true", help="Merge dev to main and tag")
     grp_git.add_argument("--drop-feature", action="store_true", help="Discard feature branch")
@@ -49,8 +48,8 @@ def execute_git_transport_phases(
     orchestrator = GitFleetManager(workspace_dir, reader.effective_config)
     exit_code = 0
 
-    for raw_token, stack_type, name, item in targets:
-        dest = workspace_dir / name
+    for name, project_slug, raw_token, item in targets:
+        dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
         try:
             # 1. Ensure dependencies exist
             orchestrator.clone_dependencies(dest, item, reader)
@@ -82,8 +81,8 @@ def execute_git_branching_phases(
     assume_yes = getattr(args, 'assume_yes', False)
 
     exit_code = 0
-    for raw_token, stack_type, name, item in targets:
-        dest = workspace_dir / name
+    for name, project_slug, raw_token, item in targets:
+        dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
         print(f"\n📦 Preparing branch on {name}...")
         try:
             if not orchestrator.start_feature(dest, name, item, args.start_feature, assume_yes):
@@ -111,8 +110,8 @@ def execute_git_authoring_phases(
     assume_yes = getattr(args, 'assume_yes', False)
 
     exit_code = 0
-    for raw_token, stack_type, name, item in targets:
-        dest = workspace_dir / name
+    for name, project_slug, raw_token, item in targets:
+        dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
         print(f"\n📦 Processing {name}...")
         try:
             if args.commit:
@@ -126,7 +125,6 @@ def execute_git_authoring_phases(
 
             if args.publish:
                 tmpl_src_root = getattr(reader, 'tmpl_dir', None)
-                # Hardcoded push=True here to enforce the default behavior you want
                 if not orchestrator.publish(dest, name, item, tmpl_src_root, raw_token, push=True, assume_yes=assume_yes):
                     exit_code = max(exit_code, 1)
             else:

@@ -23,6 +23,7 @@ from ..git.cli_plugin import (
     execute_git_branching_phases,
     execute_git_authoring_phases
 )
+from ..bootstrap.orchestrator import run_bootstrap
 from ..utils.text import slug
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("projects", nargs="*", help="One or more projects/namespaces to scaffold or build")
     grp_ws = ap.add_argument_group("Workspace Options")
     grp_ws.add_argument("-C", "--cwd", type=Path, default=Path("."), help="Run as if started in <PATH>")
+    grp_ws.add_argument("--bootstrap", action="store_true", help="Hermetically bootstrap a cloned project")
 
     # 2. Wire up the Domain Plugins!
     add_init_arguments(ap)
@@ -45,6 +47,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = ap.parse_args(argv)
     root = args.cwd.resolve()
+
+    if getattr(args, 'bootstrap', False):
+        return run_bootstrap(root)
 
     # Route 1: Workspace Initialization
     if args.init:

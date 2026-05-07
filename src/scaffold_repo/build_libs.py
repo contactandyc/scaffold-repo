@@ -93,8 +93,20 @@ def resolve_dependency_graph(
             pass
 
     raw_deps = coerce_list(local_data.get("depends_on", []))
-    for app in local_data.get("apps", {}).values():
-        raw_deps.extend(coerce_list(app.get("depends_on", [])))
+
+    for block_name in ["tests", "apps", "examples", "main"]:
+        block_data = local_data.get(block_name)
+        if not isinstance(block_data, dict): continue
+
+        raw_deps.extend(coerce_list(block_data.get("depends_on", [])))
+
+        for k, v in block_data.items():
+            if k in ("context", "depends_on"): continue
+            if isinstance(v, dict):
+                raw_deps.extend(coerce_list(v.get("depends_on", [])))
+                for tgt in coerce_list(v.get("targets", [])):
+                    if isinstance(tgt, dict):
+                        raw_deps.extend(coerce_list(tgt.get("depends_on", [])))
 
     resolved_deps = []
 
@@ -154,9 +166,30 @@ def _toposort_graph(graph: dict) -> list[str]:
                 queue.append(m)
     return ordered
 
-def execute_build(project_slug: str, target_dir: Path, reg_item: dict, workspace_dir: Path, do_build: bool = True, do_install: bool = True, do_clean: bool = False) -> None:
+def execute_build(
+        project_slug: str,
+        target_dir: Path,
+        reg_item: dict,
+        workspace_dir: Path,
+        do_build: bool = True,
+        do_install: bool = True,
+        do_clean: bool = False,
+        active_stack: str | None = None,
+        active_stack_type: str | None = None
+) -> None:
     stack = reg_item.get("stack", "generic")
-    stack_type = reg_item.get("stack_type", "")
+    stack_type = str(reg_item.get("stack_type", ""))
+
+    # --- THE FIX: Inherit the parent environment BEFORE trying to split the slash! ---
+    if stack == "generic" and active_stack:
+        stack = active_stack
+        stack_type = active_stack_type or stack_type
+
+    # Sanitize inline slash declarations (e.g., "c/cmake_app")
+    if "/" in stack:
+        stack, st_type = stack.split("/", 1)
+        if not stack_type:
+            stack_type = st_type
 
     if (target_dir / "build.sh").exists():
         print(f"  • using local build.sh (clean={do_clean}, build={do_build}, install={do_install})")
@@ -170,6 +203,20 @@ def execute_build(project_slug: str, target_dir: Path, reg_item: dict, workspace
 
         if cmds:
             run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
+
+    elif reg_item.get("build_steps"):
+        print(f"  • using explicit build_steps from registry (clean={do_clean}, build={do_build})")
+        raw_steps = coerce_list(reg_item["build_steps"])
+        sanitized = _sanitize_steps(raw_steps)
+
+        if not do_build and not do_install:
+            sanitized = [s for s in sanitized if "clean" in s or "rm -rf" in s]
+        elif not do_clean:
+            sanitized = [s for s in sanitized if s.strip() not in ("./build.sh clean", "make clean", "ninja clean") and "rm -rf" not in s]
+
+        if sanitized:
+            steps = [s.replace("/usr/local", "${PREFIX:-/usr/local}").replace("sudo ", "${SUDO}") for s in sanitized]
+            run_steps_chain(steps, cwd=target_dir, stack=stack, stack_type=stack_type)
 
     elif (target_dir / "CMakeLists.txt").exists():
         print(f"  • using smart CMake fallback (clean={do_clean}, build={do_build}, install={do_install})")
@@ -201,20 +248,6 @@ def execute_build(project_slug: str, target_dir: Path, reg_item: dict, workspace
         if cmds:
             run_steps_chain(cmds, cwd=target_dir, stack=stack, stack_type=stack_type)
 
-    elif reg_item.get("build_steps"):
-        print(f"  • using explicit build_steps from registry (clean={do_clean}, build={do_build})")
-        raw_steps = coerce_list(reg_item["build_steps"])
-        sanitized = _sanitize_steps(raw_steps)
-
-        if not do_build and not do_install:
-            sanitized = [s for s in sanitized if "clean" in s or "rm -rf" in s]
-        elif not do_clean:
-            sanitized = [s for s in sanitized if s.strip() not in ("./build.sh clean", "make clean", "ninja clean") and "rm -rf" not in s]
-
-        if sanitized:
-            steps = [s.replace("/usr/local", "${PREFIX:-/usr/local}").replace("sudo ", "${SUDO}") for s in sanitized]
-            run_steps_chain(steps, cwd=target_dir, stack=stack, stack_type=stack_type)
-
     else:
         print(f"  ⚠️  skip {project_slug}: no build.sh, CMakeLists.txt, or build_steps found.")
 
@@ -235,6 +268,10 @@ def build_all_libs(
     reader.load()
 
     reader.effective_config["workspace_dir"] = str(workspace_dir)
+
+    # --- Extract parent environment ---
+    active_stack = reader.effective_config.get("stack")
+    active_stack_type = reader.effective_config.get("stack_type")
 
     global_registry = reader._build_library_index(reader.effective_config)
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -270,6 +307,10 @@ def build_all_libs(
         if not reg_item:
             reg_item = {}
 
-        execute_build(project_slug, dep_path, reg_item, workspace_dir, do_build=do_build, do_install=do_install, do_clean=do_clean)
+        execute_build(
+            project_slug, dep_path, reg_item, workspace_dir,
+            do_build=do_build, do_install=do_install, do_clean=do_clean,
+            active_stack=active_stack, active_stack_type=active_stack_type
+        )
 
         print(f"✅ done: {project_slug}")

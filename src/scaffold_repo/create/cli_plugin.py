@@ -127,6 +127,7 @@ def run_create(project_slug: str, workspace_dir: Path, reader: ConfigReader, exi
 
     # 7. Render Template
     ctx = {
+        **answers,
         "project_slug": project_slug,
         "project_title": project_slug,
         "project_snake": snake(project_slug),

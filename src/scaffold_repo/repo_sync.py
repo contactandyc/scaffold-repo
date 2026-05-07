@@ -79,7 +79,10 @@ def apply_repo(
     copy_plan = planner.plan_copy(show_diffs=show_diffs)
 
     state: dict[str, Any] = {}
-    early = [i for i in (jinja_plan + copy_plan) if i.path == ".gitignore" and i.status in ("create", "update")]
+
+    # --- THE FIX: Only extract .gitignore early if it is legally allowed to be updated! ---
+    early = [i for i in (jinja_plan + copy_plan) if i.path == ".gitignore" and i.status in ("create", "update") and (i.status == "create" or i.updatable)]
+
     if early and not dry_run:
         if not quiet: print("\nApplying .gitignore early …")
         _apply_items(repo, early, state)
@@ -112,7 +115,8 @@ def apply_repo(
     for it in copy_plan:
         if it.status == "create":
             copy_to_apply.append(it)
-        elif it.status == "update":
+        # --- THE SECOND FIX: Honor the updatable flag on static copy files ---
+        elif it.status == "update" and it.updatable:
             if not quiet: print(f"\nNon-Jinja update: {it.path}")
             if it.diff and show_diffs and not quiet:
                 print(it.diff.rstrip())
