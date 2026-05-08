@@ -152,8 +152,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Phase 2: Git Branching
         if not is_create_run:
-            if getattr(args, 'update', False) and getattr(args, 'start_feature', None) is None:
-                args.start_feature = "chore/update-scaffolding"
+            if getattr(args, 'update', False):
                 args.assume_yes = True
 
             branching_exit = execute_git_branching_phases(args, root, workspace_dir, reader, targets)

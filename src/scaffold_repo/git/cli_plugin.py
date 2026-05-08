@@ -73,19 +73,59 @@ def execute_git_branching_phases(
         targets: list[tuple[str, str, str, dict]]
 ) -> int:
     """Executes the pre-generation branch creation steps."""
-    if not args.start_feature:
+    auto_update = getattr(args, 'update', False) and getattr(args, 'start_feature', None) is None
+    start_feat = getattr(args, 'start_feature', None)
+
+    if not start_feat and not auto_update:
         return 0
 
-    print("\n\033[1m=== Git Branching ===\033[0m")
-    orchestrator = GitFleetManager(workspace_dir, reader.effective_config)
+    feature_raw = start_feat or "chore/update-scaffolding"
     assume_yes = getattr(args, 'assume_yes', False)
 
+    header_printed = False
+    orchestrator = GitFleetManager(workspace_dir, reader.effective_config)
     exit_code = 0
+
     for name, project_slug, raw_token, item in targets:
         dest = root if not raw_token else workspace_dir / slug(posixpath.basename(raw_token))
+
+        if auto_update:
+            try:
+                if not (dest / ".git").exists():
+                    continue
+
+                res_branch = subprocess.run(["git", "branch", "--show-current"], cwd=dest, capture_output=True, text=True)
+                current_branch = res_branch.stdout.strip()
+                res_main = subprocess.run(["git", "branch", "--list", "main"], cwd=dest, capture_output=True, text=True)
+                default_branch = "main" if "main" in res_main.stdout else "master"
+
+                if current_branch != default_branch:
+                    print(f"\n📦 Skipping auto-branching for {name}: currently on '{current_branch}'. Templates will be applied in-place.")
+                    continue
+
+                status = subprocess.run(["git", "status", "--porcelain"], cwd=dest, capture_output=True, text=True)
+                is_clean = True
+                for line in status.stdout.splitlines():
+                    # Ignore changes to scaffold.yaml, everything else makes it dirty
+                    if not line.strip().endswith("scaffold.yaml"):
+                        is_clean = False
+                        break
+
+                if not is_clean:
+                    print(f"\n📦 Skipping auto-branching for {name}: uncommitted changes detected. Templates will be applied in-place.")
+                    continue
+
+            except Exception as e:
+                print(f"  \033[91m! Failed to check git status on '{name}': {e}\033[0m")
+                continue
+
+        if not header_printed:
+            print("\n\033[1m=== Git Branching ===\033[0m")
+            header_printed = True
+
         print(f"\n📦 Preparing branch on {name}...")
         try:
-            if not orchestrator.start_feature(dest, name, item, args.start_feature, assume_yes):
+            if not orchestrator.start_feature(dest, name, item, feature_raw, assume_yes):
                 exit_code = max(exit_code, 1)
         except subprocess.CalledProcessError as e:
             print(f"  \033[91m! Git command failed on '{name}': {e}\033[0m")
